@@ -48,6 +48,31 @@ class PhotoProcessorViewModel: ObservableObject {
     // Format selection
     @Published var selectedPhotoFormat: PhotoFormat = .passport
     
+    // Custom dimensions (in mm) for the custom format
+    @Published var customWidth: CGFloat = 35 {
+        didSet {
+            // The didSet is kept for programmatic changes,
+            // but text field input is now validated separately
+            if customWidth < 10 {
+                customWidth = 10
+            } else if customWidth > 100 {
+                customWidth = 100
+            }
+        }
+    }
+    
+    @Published var customHeight: CGFloat = 45 {
+        didSet {
+            // The didSet is kept for programmatic changes,
+            // but text field input is now validated separately
+            if customHeight < 10 {
+                customHeight = 10
+            } else if customHeight > 100 {
+                customHeight = 100
+            }
+        }
+    }
+    
     // Background color selection
     @Published var selectedBackgroundColor: Color = .white
     
@@ -59,14 +84,14 @@ class PhotoProcessorViewModel: ObservableObject {
     // Frame properties
     @Published var frameSize: CGSize = .zero
     
+    // Store for saved photos to be arranged on photo paper
+    @Published var savedPhotos: [SavedPhoto] = []
+    
     // Image processor
     private let imageProcessor = ImageProcessor()
     
     // Constant for the editor's display area dimension used for initial scaledToFit
     private let editorDisplayDimension: CGFloat = 400.0
-    
-    // Store for saved photos to be arranged on photo paper
-    @Published var savedPhotos: [SavedPhoto] = []
     
     // Default initializer
     init() {}
@@ -117,7 +142,15 @@ class PhotoProcessorViewModel: ObservableObject {
         let effectiveZoomScale = s_fit * self.zoomScale
         
         // Get dimensions from the selected photo format
-        let dimensions = selectedPhotoFormat.dimensions
+        let dimensions: CGSize
+        if selectedPhotoFormat == .custom {
+            // Use the custom dimensions
+            dimensions = CGSize(width: customWidth, height: customHeight)
+        } else {
+            // Use the predefined dimensions
+            dimensions = selectedPhotoFormat.dimensions
+        }
+        
         let aspectRatio = dimensions.width / dimensions.height
         
         // For display in the editor, we use a 200px height frame with appropriate width based on aspect ratio
@@ -157,7 +190,8 @@ class PhotoProcessorViewModel: ObservableObject {
             rotationAngle: rotationAngle,
             offset: processOffset,
             frameSize: processingFrameSize,
-            backgroundColor: rgbColor
+            backgroundColor: rgbColor,
+            customDimensions: selectedPhotoFormat == .custom ? dimensions : nil
         )
         
         if self.croppedImage != nil {
@@ -282,6 +316,8 @@ enum PhotoFormat: String, CaseIterable, Identifiable {
         case .chinaVisa:
             return CGSize(width: 33, height: 48) // 中国签证: 33×48mm (same as passport)
         case .custom:
+            // This will be handled by the view model's customWidth and customHeight properties
+            // Use a default value here as a fallback
             return CGSize(width: 35, height: 45) // Default for custom
         }
     }
@@ -311,7 +347,7 @@ enum PhotoFormat: String, CaseIterable, Identifiable {
         case .chinaVisa:
             return "China visa photo (33×48mm, 390×567px)"
         case .custom:
-            return "Custom size - specify your dimensions"
+            return "User-defined custom size"
         }
     }
     

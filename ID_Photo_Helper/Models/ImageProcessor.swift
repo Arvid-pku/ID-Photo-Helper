@@ -89,13 +89,17 @@ class ImageProcessor {
         rotationAngle: Double,
         offset: CGSize,
         frameSize: CGSize,
-        backgroundColor: NSColor
+        backgroundColor: NSColor,
+        customDimensions: CGSize? = nil
     ) -> NSImage? {
         print("DEBUG - Processing image with params:")
         print("  - zoomScale: \(zoomScale)")
         print("  - rotationAngle: \(rotationAngle)")
         print("  - offset: \(offset)")
         print("  - frameSize: \(frameSize)")
+        if let customDimensions = customDimensions {
+            print("  - custom dimensions: \(customDimensions)")
+        }
         
         // Step 1: Create a cropped image using the same rendering logic as the preview
         let tempImage = renderImageInFrame(
@@ -110,7 +114,15 @@ class ImageProcessor {
         // Step 2: Calculate final output dimensions in pixels
         let dpi: CGFloat = 300.0 // Standard print quality
         let mmToPixel: CGFloat = dpi / 25.4 // 25.4mm = 1 inch
-        let formatDimensions = format.dimensions
+        
+        // Use customDimensions if provided and format is .custom
+        let formatDimensions: CGSize
+        if let customDimensions = customDimensions, format == .custom {
+            formatDimensions = customDimensions
+        } else {
+            formatDimensions = format.dimensions
+        }
+        
         let finalWidth = formatDimensions.width * mmToPixel
         let finalHeight = formatDimensions.height * mmToPixel
         

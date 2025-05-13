@@ -10,7 +10,15 @@ struct PhotoEditorView: View {
     
     // Computed properties for preview dimensions
     private var previewDimensions: (width: CGFloat, height: CGFloat, aspectRatio: CGFloat) {
-        let dimensions = viewModel.selectedPhotoFormat.dimensions
+        let dimensions: CGSize
+        if viewModel.selectedPhotoFormat == .custom {
+            // Use the custom dimensions from the view model
+            dimensions = CGSize(width: viewModel.customWidth, height: viewModel.customHeight)
+        } else {
+            // Use the predefined dimensions for standard formats
+            dimensions = viewModel.selectedPhotoFormat.dimensions
+        }
+        
         let aspectRatio = dimensions.width / dimensions.height
         let previewHeight: CGFloat = 200
         let previewWidth = previewHeight * aspectRatio
@@ -46,6 +54,7 @@ struct PhotoEditorView: View {
                 // The actual view
                 LivePreviewView(
                     sourceImage: viewModel.selectedImage,
+                    viewModel: viewModel,
                     zoomScale: effectiveZoomScale,
                     rotationAngle: viewModel.rotationAngle,
                     offset: previewOffset, // Use the inverted offset
@@ -94,7 +103,7 @@ struct PhotoEditorView: View {
     // Extract the frame overlay with its modifiers
     @ViewBuilder
     private func formatFrameView() -> some View {
-        FixedFormatFrame(format: viewModel.selectedPhotoFormat)
+        FixedFormatFrame(format: viewModel.selectedPhotoFormat, viewModel: viewModel)
             .onAppear {
                 updateFrameSize()
                 viewModel.frameSize = frameSize
@@ -249,16 +258,34 @@ struct PhotoEditorView: View {
                     .padding(4)
                     .background(Color(.controlBackgroundColor).opacity(0.01))
                     
-                    Button("Add to Collection") {
+                    Button(action: {
                         viewModel.saveToCollection()
+                    }) {
+                        HStack {
+                            Text("Add to Collection")
+                            if !viewModel.savedPhotos.isEmpty {
+                                Text("(\(viewModel.savedPhotos.count))")
+                                    .foregroundColor(.blue)
+                                    .fontWeight(.bold)
+                            }
+                        }
                     }
                     .buttonStyle(.bordered)
                     .padding(4)
                     .background(Color(.controlBackgroundColor).opacity(0.01))
                     .help("Add this photo to a collection for arranging on photo paper")
                     
-                    Button("Arrange on Paper") {
+                    Button(action: {
                         showPaperLayoutView = true
+                    }) {
+                        HStack {
+                            Text("Arrange on Paper")
+                            if !viewModel.savedPhotos.isEmpty {
+                                Text("(\(viewModel.savedPhotos.count))")
+                                    .foregroundColor(.blue)
+                                    .fontWeight(.bold)
+                            }
+                        }
                     }
                     .buttonStyle(.bordered)
                     .padding(4)
@@ -354,7 +381,7 @@ struct PhotoEditorView: View {
                                     StandardColorPickerView(selectedColor: $viewModel.selectedBackgroundColor)
                                         .padding(.vertical, 5)
                                     
-                                    PhotoDimensionsInfo(format: viewModel.selectedPhotoFormat)
+                                    PhotoDimensionsInfo(format: viewModel.selectedPhotoFormat, viewModel: viewModel)
                                 }
                                 .padding()
                             }
@@ -411,7 +438,7 @@ struct PhotoEditorView: View {
                                     StandardColorPickerView(selectedColor: $viewModel.selectedBackgroundColor)
                                         .padding(.vertical, 5)
                                     
-                                    PhotoDimensionsInfo(format: viewModel.selectedPhotoFormat)
+                                    PhotoDimensionsInfo(format: viewModel.selectedPhotoFormat, viewModel: viewModel)
                                 }
                                 .padding()
                             }
@@ -449,7 +476,14 @@ struct PhotoEditorView: View {
     // Update frame size based on selected format
     private func updateFrameSize() {
         // Get dimensions from selected format in mm
-        let dimensions = viewModel.selectedPhotoFormat.dimensions
+        let dimensions: CGSize
+        if viewModel.selectedPhotoFormat == .custom {
+            // Use the custom dimensions from the view model
+            dimensions = CGSize(width: viewModel.customWidth, height: viewModel.customHeight)
+        } else {
+            // Use the predefined dimensions for standard formats
+            dimensions = viewModel.selectedPhotoFormat.dimensions
+        }
         
         // Calculate aspect ratio
         let aspectRatio = dimensions.width / dimensions.height
@@ -469,10 +503,19 @@ struct PhotoEditorView: View {
 // Fixed frame that shows the cropping area
 struct FixedFormatFrame: View {
     let format: PhotoFormat
+    @ObservedObject var viewModel: PhotoProcessorViewModel
     
     var body: some View {
         // Calculate the aspect ratio based on the format dimensions
-        let dimensions = format.dimensions
+        let dimensions: CGSize
+        if format == .custom {
+            // Use the custom dimensions from the view model
+            dimensions = CGSize(width: viewModel.customWidth, height: viewModel.customHeight)
+        } else {
+            // Use the predefined dimensions for standard formats
+            dimensions = format.dimensions
+        }
+        
         let aspectRatio = dimensions.width / dimensions.height
         
         // Use a fixed height and calculate width based on aspect ratio
@@ -548,18 +591,23 @@ struct Grid: Shape {
 
 struct PhotoDimensionsInfo: View {
     let format: PhotoFormat
+    @ObservedObject var viewModel: PhotoProcessorViewModel
     
     var body: some View {
-        // Calculate dimensions up front
-        let dimensions = format.dimensions
+        // First create a local computed property for dimensions
+        let dimensions = format == .custom
+            ? CGSize(width: viewModel.customWidth, height: viewModel.customHeight)
+            : format.dimensions
         
         // Calculate pixel dimensions at 300 DPI
         let dpi: CGFloat = 300.0
         let mmToPixel: CGFloat = dpi / 25.4 // Convert mm to pixels at 300 DPI
         let pixelWidth = Int(dimensions.width * mmToPixel)
         let pixelHeight = Int(dimensions.height * mmToPixel)
+        let formatDescription = format == .custom ? "User-defined custom size" : format.description
         
-        VStack(alignment: .leading, spacing: 5) {
+        // Then build the view
+        return VStack(alignment: .leading, spacing: 5) {
             Text("\(format.rawValue)")
                 .font(.headline)
             
@@ -571,7 +619,7 @@ struct PhotoDimensionsInfo: View {
                 .foregroundColor(.blue)
             
             // Format description
-            Text(format.description)
+            Text(formatDescription)
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -586,6 +634,7 @@ struct PhotoDimensionsInfo: View {
 // Custom preview component that directly shows what's in the frame
 struct LivePreviewView: View {
     var sourceImage: NSImage?
+    var viewModel: PhotoProcessorViewModel
     var zoomScale: CGFloat
     var rotationAngle: Double
     var offset: CGSize
@@ -597,45 +646,54 @@ struct LivePreviewView: View {
     private let imageProcessor = ImageProcessor()
     
     var body: some View {
-        // Return the snapshot that shows exactly what's in the blue frame
-        if let originalImage = sourceImage {
-            // Convert SwiftUI Color to NSColor
-            let nsBackgroundColor = NSColor(backgroundColor)
-            
-            // Use the same rendering method as the final image processing
-            let previewImage = imageProcessor.processImage(
-                originalImage: originalImage,
-                format: format,
-                zoomScale: zoomScale,
-                rotationAngle: rotationAngle,
-                offset: offset,
-                frameSize: frameSize,
-                backgroundColor: nsBackgroundColor
-            )
-            
-            if let previewImage = previewImage {
-                Image(nsImage: previewImage)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: frameSize.width, height: frameSize.height)
-                    .border(Color.red, width: 1) // Red border for the preview to visually distinguish it
+        Group {
+            if let originalImage = sourceImage {
+                // Convert SwiftUI Color to NSColor
+                let nsBackgroundColor = NSColor(backgroundColor)
+                
+                // Get the appropriate dimensions based on format
+                let dimensions = format == .custom
+                    ? CGSize(width: viewModel.customWidth, height: viewModel.customHeight)
+                    : format.dimensions
+                
+                // Use the same rendering method as the final image processing
+                let previewImage = imageProcessor.processImage(
+                    originalImage: originalImage,
+                    format: format,
+                    zoomScale: zoomScale,
+                    rotationAngle: rotationAngle,
+                    offset: offset,
+                    frameSize: frameSize,
+                    backgroundColor: nsBackgroundColor,
+                    customDimensions: format == .custom ? dimensions : nil
+                )
+                
+                Group {
+                    if let previewImage = previewImage {
+                        Image(nsImage: previewImage)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: frameSize.width, height: frameSize.height)
+                            .border(Color.red, width: 1) // Red border for the preview to visually distinguish it
+                    } else {
+                        // Fallback if processing fails
+                        Rectangle()
+                            .fill(backgroundColor)
+                            .frame(width: frameSize.width, height: frameSize.height)
+                            .border(Color.red, width: 1)
+                            .overlay(
+                                Text("Processing failed")
+                                    .foregroundColor(.white)
+                            )
+                    }
+                }
             } else {
-                // Fallback if processing fails
+                // Fallback if no source image is available
                 Rectangle()
                     .fill(backgroundColor)
                     .frame(width: frameSize.width, height: frameSize.height)
-                    .border(Color.red, width: 1)
-                    .overlay(
-                        Text("Processing failed")
-                            .foregroundColor(.white)
-                    )
+                    .border(Color.gray, width: 1)
             }
-        } else {
-            // Fallback if no source image is available
-            Rectangle()
-                .fill(backgroundColor)
-                .frame(width: frameSize.width, height: frameSize.height)
-                .border(Color.gray, width: 1)
         }
     }
 }
@@ -757,14 +815,24 @@ struct PhotoItemView: View {
     let onDragChanged: (DragGesture.Value) -> Void
     let onDragEnded: (DragGesture.Value) -> Void
     
+    // Computed properties to avoid variable declarations in body
+    private var photoWidth: CGFloat {
+        photo.pixelDimensions.width * displayScale * photo.scale
+    }
+    
+    private var photoHeight: CGFloat {
+        photo.pixelDimensions.height * displayScale * photo.scale
+    }
+    
+    private var xPos: CGFloat {
+        photo.position.x * paperWidth * displayScale
+    }
+    
+    private var yPos: CGFloat {
+        photo.position.y * paperHeight * displayScale
+    }
+    
     var body: some View {
-        let photoWidth = photo.pixelDimensions.width * displayScale * photo.scale
-        let photoHeight = photo.pixelDimensions.height * displayScale * photo.scale
-        
-        // Convert normalized position (0-1) to absolute pixels in the display
-        let xPos = photo.position.x * paperWidth * displayScale
-        let yPos = photo.position.y * paperHeight * displayScale
-        
         Image(nsImage: photo.image)
             .resizable()
             .scaledToFit()
