@@ -14,7 +14,7 @@ struct ContentView: View {
             }
         }
         .navigationTitle("ID Photo Helper")
-        .frame(minWidth: 800, minHeight: 600)
+        .frame(minWidth: 1000, minHeight: 700)
     }
 }
 
