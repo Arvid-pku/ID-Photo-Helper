@@ -101,6 +101,8 @@ class PhotoProcessorViewModel: ObservableObject {
         // Convert SwiftUI Color to NSColor with proper colorspace
         let uiColor = NSColor(selectedBackgroundColor)
         let rgbColor = uiColor.usingColorSpace(.sRGB) ?? NSColor.white
+
+        print("Processing image with background color: \(rgbColor)")
         
         // Process the image - using frameSize that matches the blue frame exactly
         self.croppedImage = imageProcessor.processImage(
@@ -253,26 +255,26 @@ enum PhotoFormat: String, CaseIterable, Identifiable {
     
     var id: String { rawValue }
     
-    var dimensions: (width: CGFloat, height: CGFloat) {
+    var dimensions: CGSize {
         switch self {
         case .passport:
-            return (35, 45) // 35x45mm standard passport photo
+            return CGSize(width: 35, height: 45) // 35x45mm standard passport photo
         case .visa:
-            return (50, 50) // 50x50mm common for visa photos
+            return CGSize(width: 50, height: 50) // 50x50mm common for visa photos
         case .driversLicense:
-            return (35, 45) // Varies by country, using common size
+            return CGSize(width: 35, height: 45) // Varies by country, using common size
         case .idCard:
-            return (35, 45) // Varies by country, using common size
+            return CGSize(width: 35, height: 45) // Varies by country, using common size
         case .usVisa:
-            return (50, 50) // 2x2 inches (50.8x50.8mm)
+            return CGSize(width: 50, height: 50) // 2x2 inches (50.8x50.8mm)
         case .schengenVisa:
-            return (35, 45) // 35x45mm Schengen standard
+            return CGSize(width: 35, height: 45) // 35x45mm Schengen standard
         case .japanVisa:
-            return (45, 45) // 45x45mm for Japan
+            return CGSize(width: 45, height: 45) // 45x45mm for Japan
         case .chinaVisa:
-            return (33, 48) // 33x48mm for Chinese visa
+            return CGSize(width: 33, height: 48) // 33x48mm for Chinese visa
         case .custom:
-            return (50, 50) // Default for custom, user can change
+            return CGSize(width: 50, height: 50) // Default for custom, user can change
         }
     }
     

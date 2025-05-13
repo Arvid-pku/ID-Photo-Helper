@@ -97,8 +97,8 @@ class ImageProcessor {
         print("  - offset: \(offset)")
         print("  - frameSize: \(frameSize)")
         
-        // Step 1: Create a perfectly cropped image using the same rendering logic as the preview
-        let resultImage = renderImageInFrame(
+        // Step 1: Create a cropped image using the same rendering logic as the preview
+        let tempImage = renderImageInFrame(
             originalImage: originalImage,
             zoomScale: zoomScale,
             rotationAngle: rotationAngle,
@@ -114,24 +114,43 @@ class ImageProcessor {
         let finalWidth = formatDimensions.width * mmToPixel
         let finalHeight = formatDimensions.height * mmToPixel
         
-        // Step 3: Create final image at the correct dimensions
-        let finalImage = NSImage(size: NSSize(width: finalWidth, height: finalHeight))
+        // Step 3: Convert the temporary NSImage to CIImage for background replacement
+        guard let ciImage = ciImage(from: tempImage) else {
+            print("Failed to convert NSImage to CIImage")
+            return tempImage // Fallback to using the temp image without background replacement
+        }
         
-        finalImage.lockFocus()
-        
-        // Use high quality interpolation for the final export
-        NSGraphicsContext.current?.imageInterpolation = .high
-        
-        // Simply scale the resultImage, preserving exactly what was shown in the preview
-        resultImage.draw(in: NSRect(origin: .zero, size: finalImage.size),
-                       from: .zero,
-                       operation: .copy,
-                       fraction: 1.0)
-        
-        finalImage.unlockFocus()
-        
-        print("Final image created with size: \(finalImage.size)")
-        return finalImage
+        // Step 4: Apply advanced background replacement
+        if let finalImageWithBackgroundReplaced = createFinalImage(
+            from: ciImage,
+            backgroundColor: backgroundColor,
+            finalWidth: finalWidth,
+            finalHeight: finalHeight
+        ) {
+            print("Successfully applied background replacement")
+            return finalImageWithBackgroundReplaced
+        } else {
+            print("Background replacement failed, using regular rendering")
+            
+            // Fallback to original method if advanced background replacement fails
+            let finalImage = NSImage(size: NSSize(width: finalWidth, height: finalHeight))
+            
+            finalImage.lockFocus()
+            
+            // Use high quality interpolation for the final export
+            NSGraphicsContext.current?.imageInterpolation = .high
+            
+            // Simply scale the tempImage, preserving exactly what was shown in the preview
+            tempImage.draw(in: NSRect(origin: .zero, size: finalImage.size),
+                           from: .zero,
+                           operation: .copy,
+                           fraction: 1.0)
+            
+            finalImage.unlockFocus()
+            
+            print("Final image created with size: \(finalImage.size)")
+            return finalImage
+        }
     }
     
     // Create the final image with background replacement
@@ -157,15 +176,15 @@ class ImageProcessor {
         print("Processing background replacement")
         
         // For ID photos, prioritize color-based background removal as it works better with uniform backgrounds
-        // Option 1: Color-based background removal (prioritized for ID photos)
-        if let colorBasedImage = replaceBackgroundByColor(image: croppedImage, newColor: backgroundColor) {
-            finalImage = colorBasedImage
-            print("Using color-based background removal")
-        }
-        // Option 2: Person segmentation (fallback for complex cases)
-        else if let segmentedImage = segmentPerson(in: croppedImage, backgroundColor: backgroundColor) {
+        // Option 1: Person segmentation (fallback for complex cases)
+        if let segmentedImage = segmentPerson(in: croppedImage, backgroundColor: backgroundColor) {
             finalImage = segmentedImage
             print("Using person segmentation for background replacement")
+        }
+        // Option 2: Color-based background removal (prioritized for ID photos)
+        else if let colorBasedImage = replaceBackgroundByColor(image: croppedImage, newColor: backgroundColor) {
+            finalImage = colorBasedImage
+            print("Using color-based background removal")
         }
         // Option 3: Fallback - just use cropped image
         else {
@@ -802,14 +821,14 @@ class ImageProcessor {
         // This is crucial for standard white-background ID photos
         backgroundColors.append(CIColor(red: 1.0, green: 1.0, blue: 1.0))
         
-        print("Detected \(backgroundColors.count) background colors (including forced white)")
+        print("!!!Detected \(backgroundColors.count) background colors (including forced white)")
         
         // Step 2: Create a mask based on color similarity (white for background, black for foreground)
         // Use a much higher tolerance for white backgrounds (common in ID photos)
         let mask = createColorSimilarityMask(for: image, 
                                             targetColors: backgroundColors, 
-                                            tolerance: 0.25) // Increased from 0.15 to 0.25
-        
+                                            tolerance: 0.75) // Increased from 0.15 to 0.25
+        print("!!!Created background mask with extent: \(mask)")
         // Step 3: Apply the mask to blend original image with new background
         if let mask = mask {
             print("Created background mask with extent: \(mask.extent)")

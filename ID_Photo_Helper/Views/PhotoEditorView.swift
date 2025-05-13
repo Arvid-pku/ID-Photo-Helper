@@ -48,7 +48,8 @@ struct PhotoEditorView: View {
                     rotationAngle: viewModel.rotationAngle,
                     offset: previewOffset, // Use the inverted offset
                     frameSize: CGSize(width: frameWidth, height: frameHeight),
-                    backgroundColor: viewModel.selectedBackgroundColor
+                    backgroundColor: viewModel.selectedBackgroundColor,
+                    format: viewModel.selectedPhotoFormat
                 )
                 .frame(width: previewWidth, height: previewHeight)
             } else {
@@ -439,6 +440,7 @@ struct LivePreviewView: View {
     var offset: CGSize
     var frameSize: CGSize
     var backgroundColor: Color
+    var format: PhotoFormat
     
     // Access to the image processor for consistent rendering
     private let imageProcessor = ImageProcessor()
@@ -450,8 +452,9 @@ struct LivePreviewView: View {
             let nsBackgroundColor = NSColor(backgroundColor)
             
             // Use the same rendering method as the final image processing
-            let previewImage = imageProcessor.renderImageInFrame(
+            let previewImage = imageProcessor.processImage(
                 originalImage: originalImage,
+                format: format,
                 zoomScale: zoomScale,
                 rotationAngle: rotationAngle,
                 offset: offset,
@@ -459,11 +462,23 @@ struct LivePreviewView: View {
                 backgroundColor: nsBackgroundColor
             )
             
-            Image(nsImage: previewImage)
-                .resizable()
-                .scaledToFit()
-                .frame(width: frameSize.width, height: frameSize.height)
-                .border(Color.red, width: 1) // Red border for the preview to visually distinguish it
+            if let previewImage = previewImage {
+                Image(nsImage: previewImage)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: frameSize.width, height: frameSize.height)
+                    .border(Color.red, width: 1) // Red border for the preview to visually distinguish it
+            } else {
+                // Fallback if processing fails
+                Rectangle()
+                    .fill(backgroundColor)
+                    .frame(width: frameSize.width, height: frameSize.height)
+                    .border(Color.red, width: 1)
+                    .overlay(
+                        Text("Processing failed")
+                            .foregroundColor(.white)
+                    )
+            }
         } else {
             // Fallback if no source image is available
             Rectangle()
