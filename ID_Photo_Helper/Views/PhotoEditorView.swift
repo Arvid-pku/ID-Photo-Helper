@@ -5,6 +5,7 @@ struct PhotoEditorView: View {
     @State private var isDragging = false
     @State private var dragOffset: CGSize = .zero
     @State private var frameSize: CGSize = .zero
+    @State private var showPaperLayoutView = false
     
     // Computed properties for preview dimensions
     private var previewDimensions: (width: CGFloat, height: CGFloat, aspectRatio: CGFloat) {
@@ -222,14 +223,24 @@ struct PhotoEditorView: View {
             }
             .buttonStyle(.borderedProminent)
             
-            // Use a conditional approach with EmptyView for the save button
             if viewModel.croppedImage != nil {
                 Button("Save") {
                     viewModel.saveProcessedImage()
                 }
                 .buttonStyle(.bordered)
-            } else {
-                EmptyView()
+                
+                Button("Add to Collection") {
+                    viewModel.saveToCollection()
+                }
+                .buttonStyle(.bordered)
+                .help("Add this photo to a collection for arranging on photo paper")
+                
+                Button("Arrange on Paper") {
+                    showPaperLayoutView = true
+                }
+                .buttonStyle(.bordered)
+                .help("Arrange saved photos on a 6-inch photo paper")
+                .disabled(viewModel.savedPhotos.isEmpty)
             }
         }
         .padding()
@@ -311,6 +322,9 @@ struct PhotoEditorView: View {
         .padding()
         .background(Color(.windowBackgroundColor))
         .animation(.interactiveSpring(), value: isDragging)
+        .sheet(isPresented: $showPaperLayoutView) {
+            PhotoPaperLayoutView(viewModel: viewModel)
+        }
         .onAppear {
             // Ensure initial processing happens
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
@@ -617,5 +631,344 @@ struct StandardColorPickerView: View {
         .padding()
         .background(Color(.controlBackgroundColor))
         .cornerRadius(8)
+    }
+}
+
+// Individual photo item on the layout canvas
+struct PhotoItemView: View {
+    let photo: SavedPhoto
+    let isSelected: Bool
+    let displayScale: CGFloat
+    let onTap: () -> Void
+    let onDelete: () -> Void
+    let onDragChanged: (DragGesture.Value) -> Void
+    let onDragEnded: (DragGesture.Value) -> Void
+    
+    var body: some View {
+        let photoWidth = photo.pixelDimensions.width * displayScale * photo.scale
+        let photoHeight = photo.pixelDimensions.height * displayScale * photo.scale
+        
+        // Convert normalized position to pixels
+        let xPos = photo.position.x * (6 * 300 * displayScale)
+        let yPos = photo.position.y * (4 * 300 * displayScale)
+        
+        Image(nsImage: photo.image)
+            .resizable()
+            .scaledToFit()
+            .frame(width: photoWidth, height: photoHeight)
+            .rotationEffect(Angle(degrees: photo.rotation))
+            .position(x: xPos, y: yPos)
+            .border(isSelected ? Color.blue : Color.clear, width: 2)
+            .overlay(
+                Group {
+                    if isSelected {
+                        VStack {
+                            HStack {
+                                Spacer()
+                                Button(action: onDelete) {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundColor(.red)
+                                        .background(Circle().fill(Color.white))
+                                }
+                                .buttonStyle(PlainButtonStyle())
+                                .padding(4)
+                            }
+                            Spacer()
+                        }
+                        .frame(width: photoWidth, height: photoHeight)
+                    }
+                }
+            )
+            .gesture(
+                DragGesture(minimumDistance: 2)
+                    .onChanged(onDragChanged)
+                    .onEnded(onDragEnded)
+            )
+            .onTapGesture(perform: onTap)
+    }
+}
+
+// Grid lines for the photo paper
+struct GridLines: Shape {
+    let columns: Int
+    let rows: Int
+    
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        
+        // Vertical lines
+        let columnWidth = rect.width / CGFloat(columns)
+        for i in 1..<columns {
+            let x = rect.minX + columnWidth * CGFloat(i)
+            path.move(to: CGPoint(x: x, y: rect.minY))
+            path.addLine(to: CGPoint(x: x, y: rect.maxY))
+        }
+        
+        // Horizontal lines
+        let rowHeight = rect.height / CGFloat(rows)
+        for i in 1..<rows {
+            let y = rect.minY + rowHeight * CGFloat(i)
+            path.move(to: CGPoint(x: rect.minX, y: y))
+            path.addLine(to: CGPoint(x: rect.maxX, y: y))
+        }
+        
+        return path
+    }
+}
+
+struct PhotoPaperLayoutView: View {
+    @ObservedObject var viewModel: PhotoProcessorViewModel
+    @State private var selectedPhotoIndex: Int? = nil
+    @State private var dragOffset: CGSize = .zero
+    @State private var isDragging = false
+    
+    // 6-inch photo paper at 300dpi is 1800x1200 pixels (landscape orientation)
+    private let paperWidth: CGFloat = 6 * 300 // 1800 pixels
+    private let paperHeight: CGFloat = 4 * 300 // 1200 pixels
+    
+    // Display scale for the UI (scaled down to fit screen)
+    private let displayScale: CGFloat = 0.25
+    
+    var body: some View {
+        VStack {
+            Text("Photo Paper Layout (6×4 inch)")
+                .font(.headline)
+                .padding(.top)
+            
+            // Layout controls
+            HStack {
+                Button("Auto Arrange") {
+                    autoArrangePhotos()
+                }
+                .buttonStyle(.bordered)
+                
+                Button("Clear All") {
+                    viewModel.clearCollection()
+                }
+                .buttonStyle(.bordered)
+                
+                Spacer()
+                
+                Button("Save Layout") {
+                    saveLayout()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            .padding(.horizontal)
+            
+            // Photo paper canvas
+            ZStack {
+                // Photo paper background
+                Rectangle()
+                    .fill(Color.white)
+                    .border(Color.gray)
+                    .frame(
+                        width: paperWidth * displayScale,
+                        height: paperHeight * displayScale
+                    )
+                
+                // Photo grid lines
+                GridLines(columns: 3, rows: 2)
+                    .stroke(Color.gray.opacity(0.3), lineWidth: 0.5)
+                    .frame(
+                        width: paperWidth * displayScale,
+                        height: paperHeight * displayScale
+                    )
+                
+                // Placed photos
+                ForEach(Array(viewModel.savedPhotos.enumerated()), id: \.element.id) { index, photo in
+                    PhotoItemView(
+                        photo: photo,
+                        isSelected: selectedPhotoIndex == index,
+                        displayScale: displayScale,
+                        onTap: {
+                            selectedPhotoIndex = index
+                        },
+                        onDelete: {
+                            viewModel.removeFromCollection(at: index)
+                            if selectedPhotoIndex == index {
+                                selectedPhotoIndex = nil
+                            }
+                        },
+                        onDragChanged: { value in
+                            isDragging = true
+                            
+                            // Calculate new position in normalized coordinates
+                            let translation = value.translation
+                            let scaledTranslation = CGSize(
+                                width: translation.width / (paperWidth * displayScale),
+                                height: translation.height / (paperHeight * displayScale)
+                            )
+                            
+                            // Update the position
+                            var newPosition = photo.position
+                            newPosition.x += scaledTranslation.width
+                            newPosition.y += scaledTranslation.height
+                            
+                            // Constrain to paper bounds
+                            newPosition.x = max(0, min(1, newPosition.x))
+                            newPosition.y = max(0, min(1, newPosition.y))
+                            
+                            // Update the model
+                            viewModel.savedPhotos[index].position = newPosition
+                            
+                            // Reset for next drag
+                            dragOffset = .zero
+                        },
+                        onDragEnded: { _ in
+                            isDragging = false
+                        }
+                    )
+                }
+            }
+            .padding()
+            .background(Color(.windowBackgroundColor))
+            
+            // Thumbnail list of available photos
+            ScrollView(.horizontal) {
+                HStack(spacing: 10) {
+                    ForEach(Array(viewModel.savedPhotos.enumerated()), id: \.element.id) { index, photo in
+                        VStack {
+                            Image(nsImage: photo.image)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(height: 80)
+                                .border(Color.gray)
+                                .shadow(color: selectedPhotoIndex == index ? Color.blue : Color.clear, radius: 3)
+                                .onTapGesture {
+                                    selectedPhotoIndex = index
+                                }
+                            
+                            Text("\(photo.format.rawValue)")
+                                .font(.caption)
+                        }
+                    }
+                }
+                .padding()
+            }
+            .frame(height: 120)
+            .background(Color(.controlBackgroundColor))
+        }
+        .frame(width: 800, height: 600)
+        .onAppear {
+            initializeLayout()
+        }
+    }
+    
+    // Initialize default positions for newly added photos
+    private func initializeLayout() {
+        // Only position photos that aren't positioned yet (position is at 0,0)
+        for (index, photo) in viewModel.savedPhotos.enumerated() {
+            if photo.position == .zero {
+                var updatedPhoto = photo
+                
+                // Create a grid-based position based on index
+                let cols = 3
+                let col = index % cols
+                let row = index / cols
+                
+                // Normalize to 0-1 range
+                let x = (CGFloat(col) / CGFloat(cols)) + 0.1
+                let y = (CGFloat(row) / 2.0) + 0.1
+                
+                updatedPhoto.position = CGPoint(x: x, y: y)
+                viewModel.savedPhotos[index] = updatedPhoto
+            }
+        }
+    }
+    
+    // Auto arrange photos in a grid pattern
+    private func autoArrangePhotos() {
+        let cols = 3
+        let rows = 2
+        
+        for (index, _) in viewModel.savedPhotos.enumerated() {
+            if index < cols * rows { // Only arrange up to grid capacity
+                let col = index % cols
+                let row = index / cols
+                
+                // Distribute evenly with margins
+                let margin: CGFloat = 0.05
+                let cellWidth = (1.0 - (margin * 2)) / CGFloat(cols)
+                let cellHeight = (1.0 - (margin * 2)) / CGFloat(rows)
+                
+                // Center in cell
+                let x = margin + (cellWidth * CGFloat(col)) + (cellWidth / 2.0)
+                let y = margin + (cellHeight * CGFloat(row)) + (cellHeight / 2.0)
+                
+                // Update the model
+                viewModel.savedPhotos[index].position = CGPoint(x: x, y: y)
+                viewModel.savedPhotos[index].rotation = 0
+                viewModel.savedPhotos[index].scale = 1.0
+            }
+        }
+    }
+    
+    // Save the layout as a single image
+    private func saveLayout() {
+        // Create a new image at 6x4 inches, 300 dpi
+        let finalImage = NSImage(size: NSSize(width: paperWidth, height: paperHeight))
+        
+        finalImage.lockFocus()
+        
+        // Fill white background
+        NSColor.white.setFill()
+        NSRect(x: 0, y: 0, width: paperWidth, height: paperHeight).fill()
+        
+        // Draw each photo at its position
+        for photo in viewModel.savedPhotos {
+            // Convert normalized position to absolute position on paper
+            let x = photo.position.x * paperWidth
+            let y = photo.position.y * paperHeight
+            
+            // Get photo dimensions
+            let photoSize = photo.pixelDimensions
+            
+            // Calculate drawing rectangle, centered on position
+            let rect = NSRect(
+                x: x - (photoSize.width * photo.scale / 2),
+                y: y - (photoSize.height * photo.scale / 2),
+                width: photoSize.width * photo.scale,
+                height: photoSize.height * photo.scale
+            )
+            
+            // Apply rotation
+            NSGraphicsContext.current?.saveGraphicsState()
+            let transform = NSAffineTransform()
+            transform.translateX(by: x, yBy: y)
+            transform.rotate(byDegrees: CGFloat(photo.rotation))
+            transform.translateX(by: -x, yBy: -y)
+            transform.concat()
+            
+            // Draw the image
+            photo.image.draw(in: rect, from: .zero, operation: .copy, fraction: 1.0)
+            
+            NSGraphicsContext.current?.restoreGraphicsState()
+        }
+        
+        finalImage.unlockFocus()
+        
+        // Save the image
+        let savePanel = NSSavePanel()
+        savePanel.allowedContentTypes = [.png, .jpeg]
+        savePanel.canCreateDirectories = true
+        savePanel.isExtensionHidden = false
+        savePanel.title = "Save Photo Paper Layout"
+        savePanel.nameFieldLabel = "File Name:"
+        savePanel.nameFieldStringValue = "photo_layout_\(Date().timeIntervalSince1970).jpg"
+        
+        if savePanel.runModal() == .OK {
+            if let url = savePanel.url,
+               let tiffData = finalImage.tiffRepresentation,
+               let bitmapImage = NSBitmapImageRep(data: tiffData),
+               let jpegData = bitmapImage.representation(using: .jpeg, properties: [.compressionFactor: 0.9]) {
+                
+                do {
+                    try jpegData.write(to: url)
+                } catch {
+                    print("Error saving layout: \(error.localizedDescription)")
+                }
+            }
+        }
     }
 } 

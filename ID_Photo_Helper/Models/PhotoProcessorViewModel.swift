@@ -4,6 +4,42 @@ import CoreImage
 import CoreImage.CIFilterBuiltins
 import Vision
 
+// Define SavedPhoto struct directly in this file
+struct SavedPhoto: Identifiable {
+    let id = UUID()
+    let image: NSImage
+    let format: PhotoFormat
+    let dateCreated: Date
+    
+    // Position on the layout canvas (normalized 0-1 coordinates)
+    var position: CGPoint = .zero
+    var scale: CGFloat = 1.0
+    var rotation: Double = 0.0
+    
+    // Calculate pixel dimensions based on format and 300dpi
+    var pixelDimensions: CGSize {
+        let dpi: CGFloat = 300.0
+        let mmToPixel: CGFloat = dpi / 25.4 // Convert mm to pixels at 300 DPI
+        return CGSize(
+            width: format.dimensions.width * mmToPixel,
+            height: format.dimensions.height * mmToPixel
+        )
+    }
+    
+    // Date formatter for display
+    static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .short
+        return formatter
+    }()
+    
+    // Date string for display
+    var dateString: String {
+        return SavedPhoto.dateFormatter.string(from: dateCreated)
+    }
+}
+
 class PhotoProcessorViewModel: ObservableObject {
     // Selected image properties
     @Published var selectedImage: NSImage?
@@ -28,6 +64,9 @@ class PhotoProcessorViewModel: ObservableObject {
     
     // Constant for the editor's display area dimension used for initial scaledToFit
     private let editorDisplayDimension: CGFloat = 400.0
+    
+    // Store for saved photos to be arranged on photo paper
+    @Published var savedPhotos: [SavedPhoto] = []
     
     // Default initializer
     init() {}
@@ -173,6 +212,31 @@ class PhotoProcessorViewModel: ObservableObject {
         
         // Process the image immediately after zoom changes
         processImage()
+    }
+    
+    // Add current photo to saved collection
+    func saveToCollection() {
+        guard let image = croppedImage else { return }
+        
+        let savedPhoto = SavedPhoto(
+            image: image,
+            format: selectedPhotoFormat,
+            dateCreated: Date()
+        )
+        
+        savedPhotos.append(savedPhoto)
+        print("Photo added to collection. Total photos: \(savedPhotos.count)")
+    }
+    
+    // Remove a photo from the collection
+    func removeFromCollection(at index: Int) {
+        guard index >= 0 && index < savedPhotos.count else { return }
+        savedPhotos.remove(at: index)
+    }
+    
+    // Clear all saved photos
+    func clearCollection() {
+        savedPhotos.removeAll()
     }
 }
 
