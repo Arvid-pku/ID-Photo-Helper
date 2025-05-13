@@ -15,7 +15,7 @@ ID Photo Helper is a native macOS application designed to simplify the creation 
 - **Intuitive Positioning**: Easily drag, zoom, and rotate your photo to perfectly fit within the required frame
 
 <p align="center">
-  <img src="figures/One_Inch_save_example.png" alt="Photo Processing Example" width="400">
+  <img src="figures/One_Inch_save_example.png" alt="Photo Processing Example" width="200">
 </p>
 
 ### Comprehensive Format Support
@@ -96,7 +96,7 @@ The app includes templates for numerous standard photo formats:
 Below is an example photo that works well with ID Photo Helper:
 
 <p align="center">
-  <img src="figures/example_photo.jpg" alt="Example Photo" width="300">
+  <img src="figures/example_photo.jpg" alt="Example Photo" width="100">
 </p>
 
 ## Tips for Perfect ID Photos
