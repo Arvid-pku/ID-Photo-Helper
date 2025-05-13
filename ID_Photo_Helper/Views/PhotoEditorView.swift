@@ -114,29 +114,57 @@ struct PhotoEditorView: View {
     // Extract zoom controls
     @ViewBuilder
     private func zoomControlsView() -> some View {
-        HStack {
-            Button(action: {
-                viewModel.adjustZoom(by: -0.15)
-                DispatchQueue.main.async {
-                    viewModel.processImage()
+        VStack(spacing: 8) {
+            HStack {
+                Button(action: {
+                    viewModel.adjustZoom(by: -0.05) // Reduced from 0.15 to 0.05 for finer control
+                    DispatchQueue.main.async {
+                        viewModel.processImage()
+                    }
+                }) {
+                    Image(systemName: "minus.magnifyingglass")
                 }
-            }) {
-                Image(systemName: "minus.magnifyingglass")
-            }
-            .buttonStyle(.bordered)
-            
-            Text("Zoom: \(Int(viewModel.zoomScale * 100))%")
-                .frame(width: 80)
-            
-            Button(action: {
-                viewModel.adjustZoom(by: 0.15)
-                DispatchQueue.main.async {
-                    viewModel.processImage()
+                .buttonStyle(.bordered)
+                
+                Text("Zoom: \(Int(viewModel.zoomScale * 100))%")
+                    .frame(width: 80)
+                
+                Button(action: {
+                    viewModel.adjustZoom(by: 0.05) // Reduced from 0.15 to 0.05 for finer control
+                    DispatchQueue.main.async {
+                        viewModel.processImage()
+                    }
+                }) {
+                    Image(systemName: "plus.magnifyingglass")
                 }
-            }) {
-                Image(systemName: "plus.magnifyingglass")
+                .buttonStyle(.bordered)
             }
-            .buttonStyle(.bordered)
+            
+            // Add a slider for precise zoom control
+            HStack {
+                Text("10%")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                
+                Slider(
+                    value: Binding(
+                        get: { viewModel.zoomScale },
+                        set: { newValue in
+                            viewModel.zoomScale = newValue
+                            DispatchQueue.main.async {
+                                viewModel.processImage()
+                            }
+                        }
+                    ),
+                    in: 0.1...3.0,
+                    step: 0.01
+                )
+                .frame(width: 200)
+                
+                Text("300%")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
         }
     }
     
@@ -145,7 +173,7 @@ struct PhotoEditorView: View {
     private func rotationControlsView() -> some View {
         HStack {
             Button(action: {
-                viewModel.rotationAngle -= 5
+                viewModel.rotationAngle -= 5  // Back to the original logic
                 DispatchQueue.main.async {
                     viewModel.processImage()
                 }
@@ -158,7 +186,7 @@ struct PhotoEditorView: View {
                 .frame(width: 80)
             
             Button(action: {
-                viewModel.rotationAngle += 5
+                viewModel.rotationAngle += 5  // Back to the original logic
                 DispatchQueue.main.async {
                     viewModel.processImage()
                 }
@@ -167,19 +195,6 @@ struct PhotoEditorView: View {
             }
             .buttonStyle(.bordered)
         }
-    }
-    
-    // Extract face detection button
-    @ViewBuilder
-    private func faceDetectionButtonView() -> some View {
-        Button(action: {
-            viewModel.autoPositionFrame()
-        }) {
-            Label("Auto-Detect Face", systemImage: "face.dashed")
-                .frame(maxWidth: .infinity)
-        }
-        .buttonStyle(.bordered)
-        .padding(.top, 8)
     }
     
     // Extract the action buttons
@@ -267,9 +282,6 @@ struct PhotoEditorView: View {
                         rotationControlsView()
                     }
                     .padding(.top, 8)
-                    
-                    // Use extracted face detection button
-                    faceDetectionButtonView()
                 }
                 .padding()
                 
@@ -281,6 +293,10 @@ struct PhotoEditorView: View {
                     
                     // Call the extracted method instead of declaring variables here
                     previewContent()
+                    
+                    // Add StandardColorPickerView
+                    StandardColorPickerView(selectedColor: $viewModel.selectedBackgroundColor)
+                        .padding(.vertical, 5)
                     
                     PhotoDimensionsInfo(format: viewModel.selectedPhotoFormat)
                 }
@@ -412,12 +428,22 @@ struct PhotoDimensionsInfo: View {
         // Calculate dimensions up front
         let dimensions = format.dimensions
         
+        // Calculate pixel dimensions at 300 DPI
+        let dpi: CGFloat = 300.0
+        let mmToPixel: CGFloat = dpi / 25.4 // Convert mm to pixels at 300 DPI
+        let pixelWidth = Int(dimensions.width * mmToPixel)
+        let pixelHeight = Int(dimensions.height * mmToPixel)
+        
         VStack(alignment: .leading, spacing: 5) {
-            Text("\(format.rawValue) Photo")
+            Text("\(format.rawValue)")
                 .font(.headline)
             
-            Text("Dimensions: \(Int(dimensions.width))mm × \(Int(dimensions.height))mm")
+            Text("Dimensions: \(Int(dimensions.width))×\(Int(dimensions.height))mm")
                 .font(.caption)
+            
+            Text("Pixels: \(pixelWidth)×\(pixelHeight)px at 300dpi")
+                .font(.caption)
+                .foregroundColor(.blue)
             
             // Format description
             Text(format.description)
@@ -524,5 +550,72 @@ struct DraggableImage: View {
                         dragOffset = .zero
                     }
             )
+    }
+}
+
+// Add this new struct for standard colors after the PhotoDimensionsInfo struct
+
+struct StandardColorPickerView: View {
+    @Binding var selectedColor: Color
+    
+    // Standard background colors for ID photos
+    private let standardColors: [(name: String, color: Color, description: String, rgb: String)] = [
+        ("White", Color(red: 1.0, green: 1.0, blue: 1.0), "For ID cards, passports, visas, driver's licenses", "R:255 G:255 B:255"),
+        ("Blue", Color(red: 67.0/255.0, green: 142.0/255.0, blue: 219.0/255.0), "For education certificates, employment records, resumes", "R:67 G:142 B:219"),
+        ("Red", Color(red: 1.0, green: 0.0, blue: 0.0), "For marriage certificates, party member IDs, title certificates", "R:255 G:0 B:0")
+    ]
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Standard Background Colors")
+                .font(.headline)
+            
+            HStack(spacing: 15) {
+                ForEach(0..<standardColors.count, id: \.self) { index in
+                    Button(action: {
+                        selectedColor = standardColors[index].color
+                    }) {
+                        VStack(spacing: 4) {
+                            Circle()
+                                .fill(standardColors[index].color)
+                                .frame(width: 30, height: 30)
+                                .overlay(
+                                    Circle()
+                                        .stroke(Color.gray, lineWidth: 1)
+                                )
+                                .overlay(
+                                    Circle()
+                                        .stroke(Color.blue, lineWidth: selectedColor == standardColors[index].color ? 2 : 0)
+                                )
+                            Text(standardColors[index].name)
+                                .font(.caption)
+                            Text(standardColors[index].rgb)
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                    .help(standardColors[index].description)
+                }
+                
+                ColorPicker("Custom Color", selection: $selectedColor)
+                    .labelsHidden()
+                    .frame(width: 100)
+            }
+            
+            Text("Color Usage Guidelines:")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .padding(.top, 5)
+            
+            ForEach(0..<standardColors.count, id: \.self) { index in
+                Text("• \(standardColors[index].name): \(standardColors[index].description)")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding()
+        .background(Color(.controlBackgroundColor))
+        .cornerRadius(8)
     }
 } 

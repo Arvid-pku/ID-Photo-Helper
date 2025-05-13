@@ -62,7 +62,7 @@ class ImageProcessor {
             // Rotate around the center of the frame
             let rotationTransform = NSAffineTransform()
             rotationTransform.translateX(by: frameSize.width / 2, yBy: frameSize.height / 2)
-            rotationTransform.rotate(byDegrees: CGFloat(rotationAngle))
+            rotationTransform.rotate(byDegrees: CGFloat(-rotationAngle))  // Use negative angle to reverse direction
             rotationTransform.translateX(by: -frameSize.width / 2, yBy: -frameSize.height / 2)
             rotationTransform.concat()
             
@@ -177,16 +177,12 @@ class ImageProcessor {
         
         // For ID photos, prioritize color-based background removal as it works better with uniform backgrounds
         // Option 1: Person segmentation (fallback for complex cases)
+        // Option 2: Color-based background removal (prioritized for ID photos)
         if let segmentedImage = segmentPerson(in: croppedImage, backgroundColor: backgroundColor) {
             finalImage = segmentedImage
             print("Using person segmentation for background replacement")
         }
-        // Option 2: Color-based background removal (prioritized for ID photos)
-        else if let colorBasedImage = replaceBackgroundByColor(image: croppedImage, newColor: backgroundColor) {
-            finalImage = colorBasedImage
-            print("Using color-based background removal")
-        }
-        // Option 3: Fallback - just use cropped image
+        // Option 2: Fallback - just use cropped image
         else {
             print("Using original image without background replacement")
             // Create a composite image with the solid background and the original image
@@ -200,6 +196,33 @@ class ImageProcessor {
                 }
             } else {
                 finalImage = croppedImage
+            }
+        }
+        
+        // Additional step to ensure the background is completely uniform with no border artifacts
+        // Create a new solid color background with the exact dimensions of the final image
+        let fullSolidColorImage = CIImage(color: ciColor).cropped(to: finalImage.extent)
+        
+        // Apply an improved blending to ensure the background is completely uniform
+        if let improvedBlendFilter = CIFilter(name: "CIBlendWithMask") {
+            // Extract alpha channel from the image to use as a mask
+            let alphaFilter = CIFilter(name: "CIColorMatrix")
+            alphaFilter?.setValue(finalImage, forKey: kCIInputImageKey)
+            // Set color matrix to extract alpha (fourth row: 0,0,0,1,0)
+            alphaFilter?.setValue(CIVector(x: 0, y: 0, z: 0, w: 0), forKey: "inputRVector")
+            alphaFilter?.setValue(CIVector(x: 0, y: 0, z: 0, w: 0), forKey: "inputGVector")
+            alphaFilter?.setValue(CIVector(x: 0, y: 0, z: 0, w: 0), forKey: "inputBVector")
+            alphaFilter?.setValue(CIVector(x: 0, y: 0, z: 0, w: 1), forKey: "inputAVector")
+            
+            if let alphaMask = alphaFilter?.outputImage {
+                improvedBlendFilter.setValue(fullSolidColorImage, forKey: kCIInputImageKey)
+                improvedBlendFilter.setValue(finalImage, forKey: kCIInputBackgroundImageKey)
+                improvedBlendFilter.setValue(alphaMask, forKey: kCIInputMaskImageKey)
+                
+                if let improvedImage = improvedBlendFilter.outputImage {
+                    finalImage = improvedImage
+                    print("Applied additional background uniformity improvement")
+                }
             }
         }
         
@@ -316,18 +339,44 @@ class ImageProcessor {
                     // We need to invert the mask
                     let invertFilter = CIFilter(name: "CIColorInvert")
                     invertFilter?.setValue(scaledMask, forKey: kCIInputImageKey)
-                    let invertedMask = invertFilter?.outputImage ?? scaledMask
+                    guard let invertedMask = invertFilter?.outputImage else {
+                        print("Failed to invert mask")
+                        semaphore.signal()
+                        return nil
+                    }
                     
-                    // Apply the mask - background (color) as input image, person (original) as background 
+                    // Improve the mask to reduce edge artifacts
+                    // 1. Apply a slight Gaussian blur to soften the mask edges
+                    let blurFilter = CIFilter(name: "CIGaussianBlur")
+                    blurFilter?.setValue(invertedMask, forKey: kCIInputImageKey)
+                    blurFilter?.setValue(0.5, forKey: kCIInputRadiusKey) // Small radius to just soften edges
+                    
+                    // 2. Use a threshold filter to sharpen the mask after blurring to remove the halo
+                    let thresholdFilter = CIFilter(name: "CIColorThreshold")
+                    thresholdFilter?.setValue(blurFilter?.outputImage ?? invertedMask, forKey: kCIInputImageKey)
+                    thresholdFilter?.setValue(0.05, forKey: "inputThreshold") // Lower threshold to capture more of the person
+                    
+                    // Get the refined mask
+                    let refinedMask = thresholdFilter?.outputImage ?? invertedMask
+                    
+                    // 3. Apply a slight choke/erode to reduce edge artifacts
+                    let chokeFilter = CIFilter(name: "CIMorphologyRectangleMinimum")
+                    chokeFilter?.setValue(refinedMask, forKey: kCIInputImageKey)
+                    chokeFilter?.setValue(2.0, forKey: "inputWidth") // Width of the morphological operation
+                    chokeFilter?.setValue(2.0, forKey: "inputHeight") // Height of the morphological operation
+                    
+                    let finalMask = chokeFilter?.outputImage ?? refinedMask
+                    
+                    // Apply the refined mask - background (color) as input image, person (original) as background 
                     if let blendFilter = CIFilter(name: "CIBlendWithMask") {
                         blendFilter.setValue(colorImage, forKey: kCIInputImageKey) 
                         blendFilter.setValue(image, forKey: kCIInputBackgroundImageKey)
-                        blendFilter.setValue(invertedMask, forKey: kCIInputMaskImageKey)
+                        blendFilter.setValue(finalMask, forKey: kCIInputMaskImageKey)
                         
                         segmentationResult = blendFilter.outputImage
                         
                         if segmentationResult != nil {
-                            print("Person segmentation successful")
+                            print("Person segmentation successful with enhanced mask")
                         } else {
                             print("Person segmentation blending failed")
                         }
@@ -361,42 +410,96 @@ class ImageProcessor {
         guard let tiffData = image.tiffRepresentation,
               let bitmap = NSBitmapImageRep(data: tiffData),
               let cgImage = bitmap.cgImage else {
+            print("Failed to convert image for face detection")
             completion(nil)
             return
         }
         
-        // Create a face detection request
-        let faceDetectionRequest = VNDetectFaceRectanglesRequest { request, error in
+        // Create a face detection request with better configuration
+        let faceDetectionRequest = VNDetectFaceLandmarksRequest { request, error in
             if let error = error {
                 print("Face detection error: \(error.localizedDescription)")
                 completion(nil)
                 return
             }
             
-            // Get the first detected face
-            guard let observations = request.results as? [VNFaceObservation],
-                  let firstFace = observations.first else {
-                print("No faces detected")
-                completion(nil)
+            // Get all detected faces
+            guard let observations = request.results as? [VNFaceObservation], !observations.isEmpty else {
+                print("No faces detected with landmarks. Trying basic face detection...")
+                
+                // Fallback to basic face detection
+                let basicRequest = VNDetectFaceRectanglesRequest { request, error in
+                    guard let faces = request.results as? [VNFaceObservation], !faces.isEmpty else {
+                        print("No faces detected with basic detection either")
+                        completion(nil)
+                        return
+                    }
+                    
+                    // Process the first face from basic detection
+                    self.processFaceObservation(faces[0], imageSize: CGSize(width: cgImage.width, height: cgImage.height), completion: completion)
+                }
+                
+                // Use a different configuration for basic detection
+                basicRequest.revision = VNDetectFaceRectanglesRequestRevision1
+                
+                do {
+                    try VNImageRequestHandler(cgImage: cgImage, options: [:]).perform([basicRequest])
+                } catch {
+                    print("Basic face detection failed: \(error)")
+                    completion(nil)
+                }
                 return
             }
             
-            // Convert normalized coordinates to image coordinates
-            let faceBounds = firstFace.boundingBox
-            let imageWidth = CGFloat(cgImage.width)
-            let imageHeight = CGFloat(cgImage.height)
-            
-            // VNBoundingBox is in normalized coordinates (0-1) with origin at bottom left
-            // Convert to CGRect with origin at top left
-            let rect = CGRect(
-                x: faceBounds.minX * imageWidth,
-                y: (1 - faceBounds.maxY) * imageHeight,
-                width: faceBounds.width * imageWidth,
-                height: faceBounds.height * imageHeight
-            )
-            
-            completion(rect)
+            // If multiple faces are detected, prioritize:
+            // 1. Largest face (likely closest to camera/main subject)
+            // 2. Face closest to center of the image
+            if observations.count > 1 {
+                print("Multiple faces detected (\(observations.count)). Finding the most prominent one...")
+                
+                let imageCenter = CGPoint(x: 0.5, y: 0.5) // Normalized image center
+                var bestFace: VNFaceObservation?
+                var bestScore: CGFloat = -1
+                
+                for face in observations {
+                    // Calculate face size (area)
+                    let faceSize = face.boundingBox.width * face.boundingBox.height
+                    
+                    // Calculate distance from center (normalized coordinates)
+                    let faceCenter = CGPoint(
+                        x: face.boundingBox.midX,
+                        y: face.boundingBox.midY
+                    )
+                    let distanceFromCenter = sqrt(
+                        pow(faceCenter.x - imageCenter.x, 2) +
+                        pow(faceCenter.y - imageCenter.y, 2)
+                    )
+                    
+                    // Score combines size (75% weight) and proximity to center (25% weight)
+                    // Higher is better
+                    let score = (faceSize * 0.75) + ((1 - distanceFromCenter) * 0.25)
+                    
+                    if score > bestScore {
+                        bestScore = score
+                        bestFace = face
+                    }
+                }
+                
+                if let bestFace = bestFace {
+                    print("Selected best face with score: \(bestScore)")
+                    self.processFaceObservation(bestFace, imageSize: CGSize(width: cgImage.width, height: cgImage.height), completion: completion)
+                } else {
+                    // Fallback to first face if scoring fails
+                    self.processFaceObservation(observations[0], imageSize: CGSize(width: cgImage.width, height: cgImage.height), completion: completion)
+                }
+            } else {
+                // Just one face - process it
+                self.processFaceObservation(observations[0], imageSize: CGSize(width: cgImage.width, height: cgImage.height), completion: completion)
+            }
         }
+        
+        // Configure the request for better detection
+        faceDetectionRequest.revision = VNDetectFaceLandmarksRequestRevision3
         
         // Perform the request
         do {
@@ -406,6 +509,81 @@ class ImageProcessor {
             print("Failed to perform face detection: \(error.localizedDescription)")
             completion(nil)
         }
+    }
+    
+    // Helper method to process face detection results
+    private func processFaceObservation(_ face: VNFaceObservation, imageSize: CGSize, completion: @escaping (CGRect?) -> Void) {
+        // Convert normalized coordinates to image coordinates
+        let faceBounds = face.boundingBox
+        let imageWidth = imageSize.width
+        let imageHeight = imageSize.height
+        
+        // VNBoundingBox is in normalized coordinates (0-1) with origin at bottom left
+        // Convert to CGRect with origin at top left
+        let rect = CGRect(
+            x: faceBounds.minX * imageWidth,
+            y: (1 - faceBounds.maxY) * imageHeight,
+            width: faceBounds.width * imageWidth,
+            height: faceBounds.height * imageHeight
+        )
+        
+        print("Face detected at: \(rect)")
+        
+        // If we have landmarks, we can make a more precise bounding box
+        if let landmarks = face.landmarks {
+            // Get all points from landmarks
+            var allPoints: [CGPoint] = []
+            
+            // Add all facial feature points we have
+            if let faceContour = landmarks.faceContour?.normalizedPoints {
+                allPoints.append(contentsOf: faceContour)
+            }
+            if let leftEye = landmarks.leftEye?.normalizedPoints {
+                allPoints.append(contentsOf: leftEye)
+            }
+            if let rightEye = landmarks.rightEye?.normalizedPoints {
+                allPoints.append(contentsOf: rightEye)
+            }
+            if let nose = landmarks.nose?.normalizedPoints {
+                allPoints.append(contentsOf: nose)
+            }
+            if let outerLips = landmarks.outerLips?.normalizedPoints {
+                allPoints.append(contentsOf: outerLips)
+            }
+            
+            // If we have enough points, calculate a more accurate bounding box
+            if allPoints.count > 10 {
+                // Convert normalized points to image coordinates
+                let imagePoints = allPoints.map { point in
+                    return CGPoint(
+                        x: (faceBounds.origin.x + point.x * faceBounds.width) * imageWidth,
+                        y: (1 - (faceBounds.origin.y + point.y * faceBounds.height)) * imageHeight
+                    )
+                }
+                
+                // Find min/max coordinates to create new bounding box
+                let minX = imagePoints.min { $0.x < $1.x }?.x ?? rect.minX
+                let minY = imagePoints.min { $0.y < $1.y }?.y ?? rect.minY
+                let maxX = imagePoints.max { $0.x < $1.x }?.x ?? rect.maxX
+                let maxY = imagePoints.max { $0.y < $1.y }?.y ?? rect.maxY
+                
+                // Create refined bounding box with some padding
+                let padding: CGFloat = 20 // Add some padding around the face
+                let refinedRect = CGRect(
+                    x: max(0, minX - padding),
+                    y: max(0, minY - padding),
+                    width: min(imageWidth, maxX - minX + (padding * 2)),
+                    height: min(imageHeight, maxY - minY + (padding * 2))
+                )
+                
+                print("Refined face bounds using landmarks: \(refinedRect)")
+                completion(refinedRect)
+                return
+            }
+        }
+        
+        // If we don't have landmarks or not enough points, use the regular bounding box
+        completion(rect)
     }
     
     // Convert NSImage to CIImage
@@ -451,7 +629,7 @@ class ImageProcessor {
         transform = transform.scaledBy(x: zoomScale, y: zoomScale)
         
         // Rotate
-        let rotationInRadians = CGFloat(rotationAngle) * .pi / 180.0
+        let rotationInRadians = CGFloat(-rotationAngle) * .pi / 180.0  // Use negative angle to reverse direction
         transform = transform.rotated(by: rotationInRadians)
         
         // Translate back and apply additional offset
@@ -496,620 +674,5 @@ class ImageProcessor {
         return image.cropped(to: cropRect)
     }
     
-    // Apply final image enhancements for a more professional look
-    private func applyFinalEnhancements(to image: CIImage) -> CIImage {
-        var result = image
-        
-        // Apply subtle sharpening if enhancement strength > 0.5
-        if enhancementStrength > 0.5, let sharpenFilter = CIFilter(name: "CISharpenLuminance") {
-            sharpenFilter.setValue(result, forKey: kCIInputImageKey)
-            sharpenFilter.setValue(enhancementStrength * 0.5, forKey: kCIInputSharpnessKey)
-            
-            if let sharpened = sharpenFilter.outputImage {
-                result = sharpened
-            }
-        }
-        
-        // Apply subtle noise reduction
-        if let noiseReductionFilter = CIFilter(name: "CINoiseReduction") {
-            noiseReductionFilter.setValue(result, forKey: kCIInputImageKey)
-            noiseReductionFilter.setValue(enhancementStrength * 0.02, forKey: "inputNoiseLevel")
-            noiseReductionFilter.setValue(enhancementStrength * 0.4, forKey: "inputSharpness")
-            
-            if let noiseReduced = noiseReductionFilter.outputImage {
-                result = noiseReduced
-            }
-        }
-        
-        return result
-    }
-    
-    // Completely revised background replacement method
-    private func replaceBackground(image: CIImage, backgroundColor: Color) -> CIImage {
-        // Convert SwiftUI Color to NSColor to CIColor
-        let nsColor = NSColor(backgroundColor)
-        guard let ciBackgroundColor = CIColor(color: nsColor) else {
-            return image
-        }
-        
-        // Create solid color background
-        let backgroundImage = CIImage(color: ciBackgroundColor).cropped(to: image.extent)
-        
-        // Try to use advanced portrait segmentation if available (iOS 12+/macOS 10.14+)
-        if useAdvancedProcessing, let advancedMask = createAdvancedPersonSegmentationMask(for: image) {
-            return applyMaskToImage(image: image, mask: advancedMask, background: backgroundImage)
-        }
-        
-        // Fall back to face-based approach if advanced segmentation fails
-        if let faceBasedMask = createFaceBasedMask(for: image) {
-            return applyMaskToImage(image: image, mask: faceBasedMask, background: backgroundImage)
-        }
-        
-        // Fall back to general approach if face detection fails
-        let generalMask = createGeneralBackgroundMask(for: image, backgroundColor: backgroundColor)
-        return applyMaskToImage(image: image, mask: generalMask, background: backgroundImage)
-    }
-    
-    // Create a mask specifically designed for portrait/ID photos focused on the face
-    private func createFaceBasedMask(for image: CIImage) -> CIImage? {
-        // Use Vision framework to detect faces
-        guard let cgImage = context.createCGImage(image, from: image.extent) else {
-            return nil
-        }
-        
-        var faceMask: CIImage?
-        let semaphore = DispatchSemaphore(value: 0)
-        
-        // Create a request to detect faces
-        let request = VNDetectFaceRectanglesRequest { (request, error) in
-            guard error == nil,
-                  let results = request.results as? [VNFaceObservation],
-                  !results.isEmpty else {
-                semaphore.signal()
-                return
-            }
-            
-            // Create a blank (black) image to draw the mask
-            let maskImage = CIImage(color: CIColor(red: 0, green: 0, blue: 0))
-                .cropped(to: image.extent)
-            
-            // For each detected face, create a white ellipse slightly larger than the face
-            var compositeMask = maskImage
-            
-            for faceObservation in results {
-                // Convert normalized coordinates to pixel coordinates
-                let faceRect = VNImageRectForNormalizedRect(
-                    faceObservation.boundingBox,
-                    Int(image.extent.width),
-                    Int(image.extent.height)
-                )
-                
-                // Create an enlarged ellipse around the face for better coverage
-                // Use a larger enlargement factor for ID photos
-                let enlargementFactor: CGFloat = 2.0 // Increased for better head/hair coverage
-                let centerX = faceRect.midX
-                let centerY = faceRect.midY
-                let ellipseWidth = faceRect.width * enlargementFactor
-                let ellipseHeight = faceRect.height * 2.0 * enlargementFactor // Much taller to include hair/shoulders
-                
-                // Create a white ellipse filter
-                guard let radialGradient = CIFilter(name: "CIRadialGradient") else {
-                    continue
-                }
-                
-                // Define the gradient from white center to black edge
-                let white = CIColor(red: 1, green: 1, blue: 1)
-                let black = CIColor(red: 0, green: 0, blue: 0)
-                
-                // Set center as a CIVector instead of separate x and y components
-                radialGradient.setValue(CIVector(x: centerX, y: centerY), forKey: "inputCenter")
-                radialGradient.setValue(min(ellipseWidth, ellipseHeight) / 2.0, forKey: "inputRadius0")
-                radialGradient.setValue(max(ellipseWidth, ellipseHeight) / 1.8, forKey: "inputRadius1")
-                radialGradient.setValue(white, forKey: "inputColor0")
-                radialGradient.setValue(black, forKey: "inputColor1")
-                
-                if let ellipseMask = radialGradient.outputImage?.cropped(to: image.extent) {
-                    // Combine with existing mask (take maximum of the two masks)
-                    guard let blendFilter = CIFilter(name: "CIMaximumCompositing") else {
-                        continue
-                    }
-                    
-                    blendFilter.setValue(compositeMask, forKey: kCIInputImageKey)
-                    blendFilter.setValue(ellipseMask, forKey: kCIInputBackgroundImageKey)
-                    
-                    if let blendedMask = blendFilter.outputImage {
-                        compositeMask = blendedMask
-                    }
-                }
-            }
-            
-            // Apply some smoothing to the mask with more intensive blur for smoother edges
-            guard let blurFilter = CIFilter(name: "CIGaussianBlur") else {
-                semaphore.signal()
-                return
-            }
-            
-            blurFilter.setValue(compositeMask, forKey: kCIInputImageKey)
-            blurFilter.setValue(8.0, forKey: kCIInputRadiusKey) // Increased blur for smoother transitions
-            
-            if let smoothedMask = blurFilter.outputImage {
-                faceMask = smoothedMask
-            }
-            
-            semaphore.signal()
-        }
-        
-        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-        
-        do {
-            try handler.perform([request])
-        } catch {
-            print("Face detection failed: \(error.localizedDescription)")
-            semaphore.signal()
-        }
-        
-        // Wait for the processing to complete
-        _ = semaphore.wait(timeout: .now() + 5)
-        return faceMask
-    }
-    
-    // Apply a mask to an image using blend filter
-    private func applyMaskToImage(image: CIImage, mask: CIImage, background: CIImage) -> CIImage {
-        // Use CIBlendWithMask filter with better parameters
-        guard let blendFilter = CIFilter(name: "CIBlendWithMask") else {
-            return image
-        }
-        
-        // Set up filter with key-value coding
-        blendFilter.setValue(image, forKey: kCIInputImageKey)
-        blendFilter.setValue(background, forKey: kCIInputBackgroundImageKey)
-        blendFilter.setValue(mask, forKey: kCIInputMaskImageKey)
-        
-        // Get output image or return original if filter fails
-        guard let outputImage = blendFilter.outputImage else {
-            return image
-        }
-        
-        return outputImage
-    }
-    
-    // Helper method removed as it's no longer needed with the improved algorithm
-    private func createAdaptiveThreshold(for image: CIImage) -> CIImage? {
-        // Enhanced in applyBackgroundReplacement method
-        return nil
-    }
-    
-    // New advanced person segmentation for better background removal
-    private func createAdvancedPersonSegmentationMask(for image: CIImage) -> CIImage? {
-        guard let cgImage = context.createCGImage(image, from: image.extent) else {
-            return nil
-        }
-        
-        var personMask: CIImage?
-        let semaphore = DispatchSemaphore(value: 0)
-        
-        // Use Vision's person segmentation request if available (iOS 15+/macOS 12+)
-        if #available(macOS 12.0, *) {
-            let request = VNGeneratePersonSegmentationRequest()
-            request.qualityLevel = .accurate
-            
-            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-            
-            do {
-                try handler.perform([request])
-                
-                if let maskPixelBuffer = request.results?.first?.pixelBuffer {
-                    // Convert the mask to a CIImage
-                    let maskCIImage = CIImage(cvPixelBuffer: maskPixelBuffer)
-                    
-                    // Apply a slight blur for smoother edges
-                    if let blurFilter = CIFilter(name: "CIGaussianBlur") {
-                        blurFilter.setValue(maskCIImage, forKey: kCIInputImageKey)
-                        blurFilter.setValue(3.0, forKey: kCIInputRadiusKey)
-                        
-                        if let blurredMask = blurFilter.outputImage {
-                            // Scale the mask to match the original image size
-                            let scaleX = image.extent.width / maskCIImage.extent.width
-                            let scaleY = image.extent.height / maskCIImage.extent.height
-                            
-                            let scaleTransform = CGAffineTransform(scaleX: scaleX, y: scaleY)
-                            personMask = blurredMask.transformed(by: scaleTransform)
-                        }
-                    }
-                }
-            } catch {
-                print("Person segmentation failed: \(error.localizedDescription)")
-            }
-        }
-        
-        semaphore.signal()
-        _ = semaphore.wait(timeout: .now() + 2)
-        
-        return personMask
-    }
-    
-    // Create a general background mask as a last resort
-    private func createGeneralBackgroundMask(for image: CIImage, backgroundColor: Color) -> CIImage {
-        // Extract luminance as before
-        guard let luminanceFilter = CIFilter(name: "CIColorMatrix") else {
-            return CIImage(color: CIColor(red: 1, green: 1, blue: 1)).cropped(to: image.extent)
-        }
-        
-        luminanceFilter.setValue(image, forKey: kCIInputImageKey)
-        // RGB to luminance conversion using standard coefficients
-        luminanceFilter.setValue(CIVector(x: 0.2126, y: 0.7152, z: 0.0722, w: 0), forKey: "inputRVector")
-        luminanceFilter.setValue(CIVector(x: 0.2126, y: 0.7152, z: 0.0722, w: 0), forKey: "inputGVector")
-        luminanceFilter.setValue(CIVector(x: 0.2126, y: 0.7152, z: 0.0722, w: 0), forKey: "inputBVector")
-        
-        guard let luminanceImage = luminanceFilter.outputImage else {
-            return CIImage(color: CIColor(red: 1, green: 1, blue: 1)).cropped(to: image.extent)
-        }
-        
-        // Determine if background is light or dark
-        let backgroundColor = NSColor(backgroundColor)
-        let isLightBackground = backgroundColor.brightnessComponent > 0.5
-        
-        // Use more sophisticated edge detection
-        guard let edgeFilter = CIFilter(name: "CIEdges") else {
-            return luminanceImage
-        }
-        
-        edgeFilter.setValue(luminanceImage, forKey: kCIInputImageKey)
-        edgeFilter.setValue(2.0, forKey: "inputIntensity")
-        
-        guard let edgeImage = edgeFilter.outputImage else {
-            return luminanceImage
-        }
-        
-        // Invert the edge image for light backgrounds
-        var maskImage = edgeImage
-        if isLightBackground {
-            guard let colorInvert = CIFilter(name: "CIColorInvert") else {
-                return edgeImage
-            }
-            
-            colorInvert.setValue(edgeImage, forKey: kCIInputImageKey)
-            
-            if let inverted = colorInvert.outputImage {
-                maskImage = inverted
-            }
-        }
-        
-        // Apply a threshold operation
-        guard let thresholdFilter = CIFilter(name: "CIColorThreshold") else {
-            return maskImage
-        }
-        
-        thresholdFilter.setValue(maskImage, forKey: kCIInputImageKey)
-        thresholdFilter.setValue(isLightBackground ? 0.4 : 0.6, forKey: "inputThreshold")
-        
-        guard let thresholdImage = thresholdFilter.outputImage else {
-            return maskImage
-        }
-        
-        // Apply a blur for smoother edges
-        guard let blurFilter = CIFilter(name: "CIGaussianBlur") else {
-            return thresholdImage
-        }
-        
-        blurFilter.setValue(thresholdImage, forKey: kCIInputImageKey)
-        blurFilter.setValue(5.0, forKey: kCIInputRadiusKey)
-        
-        if let blurredMask = blurFilter.outputImage {
-            return blurredMask
-        }
-        
-        return thresholdImage
-    }
-    
-    // Color-based background removal method
-    private func replaceBackgroundByColor(image: CIImage, newColor: NSColor) -> CIImage? {
-        // Convert the background color to CIColor
-        let rgbColor = newColor.usingColorSpace(.sRGB) ?? NSColor.white
-        let ciBackgroundColor = CIColor(red: rgbColor.redComponent,
-                                       green: rgbColor.greenComponent,
-                                       blue: rgbColor.blueComponent,
-                                       alpha: rgbColor.alphaComponent)
-        
-        // Create solid color background
-        let backgroundImage = CIImage(color: ciBackgroundColor).cropped(to: image.extent)
-        
-        // Step 1: Detect dominant background colors
-        var backgroundColors = detectBackgroundColors(in: image)
-        
-        // Always add white as a potential background color for ID photos
-        // This is crucial for standard white-background ID photos
-        backgroundColors.append(CIColor(red: 1.0, green: 1.0, blue: 1.0))
-        
-        print("!!!Detected \(backgroundColors.count) background colors (including forced white)")
-        
-        // Step 2: Create a mask based on color similarity (white for background, black for foreground)
-        // Use a much higher tolerance for white backgrounds (common in ID photos)
-        let mask = createColorSimilarityMask(for: image, 
-                                            targetColors: backgroundColors, 
-                                            tolerance: 0.75) // Increased from 0.15 to 0.25
-        print("!!!Created background mask with extent: \(mask)")
-        // Step 3: Apply the mask to blend original image with new background
-        if let mask = mask {
-            print("Created background mask with extent: \(mask.extent)")
-            
-            // Use CIBlendWithMask filter
-            // This filter uses the mask to determine how to blend the two images
-            // White areas in the mask show the input image (background color)
-            // Black areas in the mask show the background image (original person)
-            if let blendFilter = CIFilter(name: "CIBlendWithMask") {
-                blendFilter.setValue(backgroundImage, forKey: kCIInputImageKey)
-                blendFilter.setValue(image, forKey: kCIInputBackgroundImageKey)
-                blendFilter.setValue(mask, forKey: kCIInputMaskImageKey)
-                
-                if let result = blendFilter.outputImage {
-                    print("Successfully created background replacement with dimensions: \(result.extent)")
-                    return result
-                }
-            }
-        }
-        
-        print("Failed to create background replacement using color detection")
-        return nil
-    }
-    
-    // Detect the likely background colors by sampling the edges of the image
-    private func detectBackgroundColors(in image: CIImage) -> [CIColor] {
-        guard let cgImage = context.createCGImage(image, from: image.extent) else {
-            return []
-        }
-        
-        let width = cgImage.width
-        let height = cgImage.height
-        let bytesPerPixel = 4
-        let bytesPerRow = bytesPerPixel * width
-        
-        // Sample points from the edges of the image
-        var samplePoints: [(x: Int, y: Int)] = []
-        
-        // Top edge
-        for x in stride(from: 0, to: width, by: width/10) {
-            samplePoints.append((x: x, y: 5))
-        }
-        
-        // Bottom edge
-        for x in stride(from: 0, to: width, by: width/10) {
-            samplePoints.append((x: x, y: height - 5))
-        }
-        
-        // Left edge
-        for y in stride(from: 0, to: height, by: height/10) {
-            samplePoints.append((x: 5, y: y))
-        }
-        
-        // Right edge
-        for y in stride(from: 0, to: height, by: height/10) {
-            samplePoints.append((x: width - 5, y: y))
-        }
-        
-        // Create a bitmap context to read pixel data
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
-        guard let data = calloc(height, bytesPerRow) else {
-            return []
-        }
-        
-        guard let context = CGContext(data: data,
-                                     width: width,
-                                     height: height,
-                                     bitsPerComponent: 8,
-                                     bytesPerRow: bytesPerRow,
-                                     space: colorSpace,
-                                     bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
-            free(data)
-            return []
-        }
-        
-        // Draw the image into the context
-        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
-        
-        // Read color samples
-        var colors: [CIColor] = []
-        for point in samplePoints {
-            let offset = point.y * bytesPerRow + point.x * bytesPerPixel
-            let pixelData = data.advanced(by: offset).assumingMemoryBound(to: UInt8.self)
-            
-            let r = CGFloat(pixelData[0]) / 255.0
-            let g = CGFloat(pixelData[1]) / 255.0
-            let b = CGFloat(pixelData[2]) / 255.0
-            let a = CGFloat(pixelData[3]) / 255.0
-            
-            colors.append(CIColor(red: r, green: g, blue: b, alpha: a))
-        }
-        
-        free(data)
-        
-        // Group similar colors and return the most common
-        return findDominantColors(from: colors, maxColors: 3)
-    }
-    
-    // Find dominant colors from a set of samples
-    private func findDominantColors(from colors: [CIColor], maxColors: Int) -> [CIColor] {
-        var colorGroups: [[CIColor]] = []
-        
-        // Group similar colors
-        for color in colors {
-            var addedToGroup = false
-            
-            for i in 0..<colorGroups.count {
-                let groupColor = colorGroups[i].first!
-                
-                // Check if colors are similar
-                if colorDistance(color1: color, color2: groupColor) < 0.1 {
-                    colorGroups[i].append(color)
-                    addedToGroup = true
-                    break
-                }
-            }
-            
-            if !addedToGroup {
-                colorGroups.append([color])
-            }
-        }
-        
-        // Sort by group size (most frequent colors first)
-        colorGroups.sort { $0.count > $1.count }
-        
-        // Return the average color from each of the largest groups
-        var dominantColors: [CIColor] = []
-        for i in 0..<min(maxColors, colorGroups.count) {
-            let group = colorGroups[i]
-            let avgR = group.reduce(0.0) { $0 + $1.red } / CGFloat(group.count)
-            let avgG = group.reduce(0.0) { $0 + $1.green } / CGFloat(group.count)
-            let avgB = group.reduce(0.0) { $0 + $1.blue } / CGFloat(group.count)
-            let avgA = group.reduce(0.0) { $0 + $1.alpha } / CGFloat(group.count)
-            
-            dominantColors.append(CIColor(red: avgR, green: avgG, blue: avgB, alpha: avgA))
-        }
-        
-        return dominantColors
-    }
-    
-    // Calculate distance between colors in RGB space
-    private func colorDistance(color1: CIColor, color2: CIColor) -> CGFloat {
-        let rDiff = color1.red - color2.red
-        let gDiff = color1.green - color2.green
-        let bDiff = color1.blue - color2.blue
-        
-        return sqrt(rDiff*rDiff + gDiff*gDiff + bDiff*bDiff)
-    }
-    
-    // Create a mask where white pixels represent background (colors to replace)
-    private func createColorSimilarityMask(for image: CIImage, targetColors: [CIColor], tolerance: CGFloat) -> CIImage? {
-        // Use the Core Image color distance filter
-        guard let distanceFilter = CIFilter(name: "CIColorMonochrome") else {
-            return nil
-        }
-        
-        let luminance = convertToLuminance(image: image)
-        
-        var totalMask: CIImage?
-        
-        for targetColor in targetColors {
-            // Determine if this is a white/light color 
-            let isWhiteColor = targetColor.red > 0.9 && targetColor.green > 0.9 && targetColor.blue > 0.9
-            
-            // Use a higher tolerance for white
-            let effectiveTolerance = isWhiteColor ? tolerance * 1.5 : tolerance
-            
-            // Create a color cube filter for this target color
-            guard let colorCube = CIFilter(name: "CIColorCube") else {
-                continue
-            }
-            
-            // Create a color cube that replaces target color with white, others with black
-            let size = 64 // Cube dimension
-            let cubeSize = size * size * size * 4 // 4 bytes per color (RGBA)
-            let cubeData = UnsafeMutablePointer<Float>.allocate(capacity: cubeSize)
-            defer { cubeData.deallocate() }
-            
-            // For each color in our cube
-            for z in 0..<size {
-                let blue = CGFloat(z) / CGFloat(size-1)
-                for y in 0..<size {
-                    let green = CGFloat(y) / CGFloat(size-1)
-                    for x in 0..<size {
-                        let red = CGFloat(x) / CGFloat(size-1)
-                        
-                        let offset = z * size * size + y * size + x
-                        
-                        // Calculate color distance
-                        let pixelColor = CIColor(red: red, green: green, blue: blue)
-                        var distance = colorDistance(color1: pixelColor, color2: targetColor)
-                        
-                        // For white/light colors, use a more forgiving distance calculation
-                        // that puts more emphasis on lightness than color
-                        if isWhiteColor {
-                            let pixelLightness = (red + green + blue) / 3.0
-                            let targetLightness = (targetColor.red + targetColor.green + targetColor.blue) / 3.0
-                            
-                            // Adjust distance to favor lightness similarity for white backgrounds
-                            let lightnessDistance = abs(pixelLightness - targetLightness) * 2.0
-                            distance = min(distance, lightnessDistance)
-                        }
-                        
-                        // If color is close to target, make it white in mask (1.0)
-                        // otherwise black (0.0)
-                        let isBackground = distance < effectiveTolerance
-                        
-                        // Set RGB components (white for background, black for foreground)
-                        cubeData[offset * 4] = isBackground ? 1.0 : 0.0     // R
-                        cubeData[offset * 4 + 1] = isBackground ? 1.0 : 0.0 // G
-                        cubeData[offset * 4 + 2] = isBackground ? 1.0 : 0.0 // B
-                        cubeData[offset * 4 + 3] = 1.0                      // A (always opaque)
-                    }
-                }
-            }
-            
-            // Create the color cube
-            let data = Data(bytes: cubeData, count: cubeSize * MemoryLayout<Float>.size)
-            colorCube.setValue(size, forKey: "inputCubeDimension")
-            colorCube.setValue(data, forKey: "inputCubeData")
-            colorCube.setValue(image, forKey: kCIInputImageKey)
-            
-            guard let colorMask = colorCube.outputImage else {
-                continue
-            }
-            
-            // Combine with existing mask
-            if let existingMask = totalMask {
-                guard let maxFilter = CIFilter(name: "CIMaximumCompositing") else {
-                    continue
-                }
-                
-                maxFilter.setValue(existingMask, forKey: kCIInputImageKey)
-                maxFilter.setValue(colorMask, forKey: kCIInputBackgroundImageKey)
-                
-                totalMask = maxFilter.outputImage
-            } else {
-                totalMask = colorMask
-            }
-        }
-        
-        guard let finalMask = totalMask else {
-            return nil
-        }
-        
-        // Apply a blur to smooth the mask
-        guard let blurFilter = CIFilter(name: "CIGaussianBlur") else {
-            return finalMask
-        }
-        
-        blurFilter.setValue(finalMask, forKey: kCIInputImageKey)
-        blurFilter.setValue(2.0, forKey: kCIInputRadiusKey)
-        
-        return blurFilter.outputImage
-    }
-    
-    // Convert image to luminance (grayscale)
-    private func convertToLuminance(image: CIImage) -> CIImage? {
-        guard let filter = CIFilter(name: "CIColorMatrix") else {
-            return nil
-        }
-        
-        filter.setValue(image, forKey: kCIInputImageKey)
-        filter.setValue(CIVector(x: 0.2126, y: 0.7152, z: 0.0722, w: 0), forKey: "inputRVector")
-        filter.setValue(CIVector(x: 0.2126, y: 0.7152, z: 0.0722, w: 0), forKey: "inputGVector")
-        filter.setValue(CIVector(x: 0.2126, y: 0.7152, z: 0.0722, w: 0), forKey: "inputBVector")
-        
-        return filter.outputImage
-    }
-    
-    // Apply color mask to original image
-    private func applyColorMask(originalImage: CIImage, backgroundImage: CIImage, mask: CIImage) -> CIImage? {
-        guard let blendFilter = CIFilter(name: "CIBlendWithMask") else {
-            return nil
-        }
-        
-        blendFilter.setValue(backgroundImage, forKey: kCIInputImageKey)
-        blendFilter.setValue(originalImage, forKey: kCIInputBackgroundImageKey)
-        blendFilter.setValue(mask, forKey: kCIInputMaskImageKey)
-        
-        return blendFilter.outputImage
-    }
-}
+  }
 

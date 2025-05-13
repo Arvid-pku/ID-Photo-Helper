@@ -104,13 +104,19 @@ class PhotoProcessorViewModel: ObservableObject {
 
         print("Processing image with background color: \(rgbColor)")
         
+        // Invert the y-offset to match the preview behavior
+        let processOffset = CGSize(
+            width: offset.width,
+            height: -offset.height // Invert the Y direction
+        )
+        
         // Process the image - using frameSize that matches the blue frame exactly
         self.croppedImage = imageProcessor.processImage(
             originalImage: selectedImage,
             format: selectedPhotoFormat,
             zoomScale: effectiveZoomScale,
             rotationAngle: rotationAngle,
-            offset: offset,
+            offset: processOffset,
             frameSize: processingFrameSize,
             backgroundColor: rgbColor
         )
@@ -158,98 +164,30 @@ class PhotoProcessorViewModel: ObservableObject {
     
     // Adjust zoom level
     func adjustZoom(by delta: CGFloat) {
-        // Limit zoom range to 10% - 300% as requested
-        let newZoom = max(0.1, min(zoomScale + delta, 3.0))
-        zoomScale = newZoom
+        // Calculate new zoom value with 2 decimal precision for finer control
+        let newZoomRaw = zoomScale + delta
+        let newZoom = (newZoomRaw * 100).rounded() / 100 // Round to 2 decimal places
+        
+        // Limit zoom range to 10% - 300%
+        zoomScale = max(0.1, min(newZoom, 3.0))
         
         // Process the image immediately after zoom changes
         processImage()
-    }
-    
-    // Auto-position the frame based on face detection
-    func autoPositionFrame() {
-        guard let image = selectedImage else { return }
-        
-        // Reset rotation first
-        rotationAngle = 0.0
-        
-        // Perform face detection and center frame on face
-        imageProcessor.detectFace(in: image) { [weak self] faceBounds in
-            guard let strongSelf = self else { return }
-            
-            if faceBounds == nil {
-                print("No face detected")
-                // If no face detected, reset to center
-                DispatchQueue.main.async {
-                    strongSelf.offset = .zero
-                    strongSelf.zoomScale = 1.0
-                    strongSelf.processImage()
-                }
-                return 
-            }
-            
-            let detectedBounds = faceBounds!
-            
-            DispatchQueue.main.async {
-                // Get the frame dimensions
-                let dimensions = strongSelf.selectedPhotoFormat.dimensions
-                let aspectRatio = dimensions.width / dimensions.height
-                let frameHeight: CGFloat = 200 // Must match the height in FixedFormatFrame
-                let frameWidth = frameHeight * aspectRatio
-                
-                // Get image size
-                let imageSize = image.size
-                
-                // Calculate the required zoom to make the face fill about 70-80% of the frame height
-                let faceToFrameRatio: CGFloat = 0.7 // Face should take 70% of frame height
-                let targetFaceHeight = frameHeight * faceToFrameRatio
-                
-                // Calculate required zoom
-                let zoomToFitFace = targetFaceHeight / detectedBounds.height
-                
-                // Apply min/max bounds to zoom
-                strongSelf.zoomScale = min(max(zoomToFitFace, 0.1), 3.0)
-                
-                // Calculate position to center the face in the frame
-                // First, determine where the face center would be at current zoom
-                let faceCenterX = detectedBounds.midX * strongSelf.zoomScale
-                let faceCenterY = detectedBounds.midY * strongSelf.zoomScale
-                
-                // Then calculate the offset to center the face in the frame
-                let frameCenter = CGPoint(x: frameWidth / 2, y: frameHeight / 2)
-                let scaledImageCenter = CGPoint(
-                    x: imageSize.width * strongSelf.zoomScale / 2,
-                    y: imageSize.height * strongSelf.zoomScale / 2
-                )
-                
-                // Calculate offset from the centered position
-                let offsetX = frameCenter.x - faceCenterX
-                let offsetY = frameCenter.y - faceCenterY
-                
-                // Apply the calculated offset
-                strongSelf.offset = CGSize(width: offsetX, height: offsetY)
-                
-                print("Auto-positioned face:")
-                print("  - Face bounds: \(detectedBounds)")
-                print("  - Zoom: \(strongSelf.zoomScale)")
-                print("  - Offset: \(strongSelf.offset)")
-                
-                // Process image with new position and zoom
-                strongSelf.processImage()
-            }
-        }
     }
 }
 
 // Photo format specifications
 enum PhotoFormat: String, CaseIterable, Identifiable {
-    case passport = "Passport"
-    case visa = "Visa"
-    case driversLicense = "Driver's License"
+    case oneInch = "One Inch"
+    case largeOneInch = "Large One Inch"
+    case twoInch = "Two Inch"
+    case smallTwoInch = "Small Two Inch" 
+    case largeTwoInch = "Large Two Inch"
     case idCard = "ID Card"
+    case passport = "Passport"
     case usVisa = "US Visa"
-    case schengenVisa = "Schengen Visa" 
     case japanVisa = "Japan Visa"
+    case schengenVisa = "Schengen Visa"
     case chinaVisa = "China Visa"
     case custom = "Custom"
     
@@ -257,45 +195,57 @@ enum PhotoFormat: String, CaseIterable, Identifiable {
     
     var dimensions: CGSize {
         switch self {
-        case .passport:
-            return CGSize(width: 35, height: 45) // 35x45mm standard passport photo
-        case .visa:
-            return CGSize(width: 50, height: 50) // 50x50mm common for visa photos
-        case .driversLicense:
-            return CGSize(width: 35, height: 45) // Varies by country, using common size
+        case .oneInch:
+            return CGSize(width: 25, height: 35) // 一寸: 25×35mm
+        case .largeOneInch:
+            return CGSize(width: 33, height: 48) // 大一寸: 33×48mm
+        case .twoInch:
+            return CGSize(width: 35, height: 49) // 二寸: 35×49mm
+        case .smallTwoInch:
+            return CGSize(width: 35, height: 45) // 小二寸: 35×45mm
+        case .largeTwoInch:
+            return CGSize(width: 35, height: 53) // 大二寸: 35×53mm
         case .idCard:
-            return CGSize(width: 35, height: 45) // Varies by country, using common size
+            return CGSize(width: 26, height: 32) // 身份证: 26×32mm
+        case .passport:
+            return CGSize(width: 33, height: 48) // 护照/港澳通行证: 33×48mm
         case .usVisa:
-            return CGSize(width: 50, height: 50) // 2x2 inches (50.8x50.8mm)
-        case .schengenVisa:
-            return CGSize(width: 35, height: 45) // 35x45mm Schengen standard
+            return CGSize(width: 51, height: 51) // 美国签证: 51×51mm
         case .japanVisa:
-            return CGSize(width: 45, height: 45) // 45x45mm for Japan
+            return CGSize(width: 45, height: 45) // 日本签证: 45×45mm
+        case .schengenVisa:
+            return CGSize(width: 35, height: 45) // 申根签证: 35×45mm
         case .chinaVisa:
-            return CGSize(width: 33, height: 48) // 33x48mm for Chinese visa
+            return CGSize(width: 33, height: 48) // 中国签证: 33×48mm (same as passport)
         case .custom:
-            return CGSize(width: 50, height: 50) // Default for custom, user can change
+            return CGSize(width: 35, height: 45) // Default for custom
         }
     }
     
     var description: String {
         switch self {
-        case .passport:
-            return "Standard 35×45mm passport photo used by most countries"
-        case .visa:
-            return "Standard 50×50mm visa photo format"
-        case .driversLicense:
-            return "Standard size for most driver's licenses"
+        case .oneInch:
+            return "Standard one inch format (25×35mm, 295×413px)"
+        case .largeOneInch:
+            return "Large one inch format (33×48mm, 390×567px)"
+        case .twoInch:
+            return "Standard two inch format (35×49mm, 413×579px)"
+        case .smallTwoInch:
+            return "Small two inch format (35×45mm, 413×531px)"
+        case .largeTwoInch:
+            return "Large two inch format (35×53mm, 413×626px)"
         case .idCard:
-            return "Common ID card format (varies by country)"
+            return "ID card photo (26×32mm, 358×441px)"
+        case .passport:
+            return "Passport/travel permit (33×48mm, 390×567px)"
         case .usVisa:
-            return "US visa/passport photo (2×2 inches)"
-        case .schengenVisa:
-            return "Format for Schengen area visa applications"
+            return "US visa photo (51×51mm, 600×600px)"
         case .japanVisa:
-            return "Square format for Japanese visa applications"
+            return "Japan visa photo (45×45mm, 531×531px)"
+        case .schengenVisa:
+            return "Schengen visa photo (35×45mm, 413×531px)"
         case .chinaVisa:
-            return "Chinese visa photo requirements"
+            return "China visa photo (33×48mm, 390×567px)"
         case .custom:
             return "Custom size - specify your dimensions"
         }
