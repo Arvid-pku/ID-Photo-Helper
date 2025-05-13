@@ -14,20 +14,6 @@ struct ID_Photo_HelperApp: App {
     // Create an instance of AppDelegate and store it in NSApp.delegate
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     
-    init() {
-        // Capture viewModel to avoid 'self' capture issues
-        let viewModelRef = viewModel
-        
-        // We need to use DispatchQueue.main.async here because NSApp.delegate 
-        // is not set until after init() completes
-        DispatchQueue.main.async {
-            // Store the shared view model in the app delegate
-            if let appDelegate = NSApp.delegate as? AppDelegate {
-                appDelegate.sharedViewModel = viewModelRef
-            }
-        }
-    }
-    
     var body: some Scene {
         WindowGroup {
             ContentView()
@@ -37,6 +23,17 @@ struct ID_Photo_HelperApp: App {
                     if phase == .active {
                         // This will trigger a view update when the app becomes active again
                         NotificationCenter.default.post(name: NSNotification.Name("AppBecameActive"), object: nil)
+                        
+                        // Set shared view model in app delegate when the app becomes active
+                        if let appDelegate = NSApp.delegate as? AppDelegate {
+                            appDelegate.sharedViewModel = viewModel
+                        }
+                    }
+                }
+                .onAppear {
+                    // Set shared view model in app delegate when the view appears
+                    if let appDelegate = NSApp.delegate as? AppDelegate {
+                        appDelegate.sharedViewModel = viewModel
                     }
                 }
         }

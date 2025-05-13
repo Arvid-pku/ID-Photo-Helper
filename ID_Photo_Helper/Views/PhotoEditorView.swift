@@ -1,5 +1,49 @@
 import SwiftUI
 
+// Define available paper sizes at the file level
+enum PaperSize: String, CaseIterable, Identifiable {
+    case size3inch = "3 inch (8.9×6.4cm)"
+    case size4inch = "4 inch (10.2×7.6cm)"
+    case size5inch = "5 inch (12.7×8.9cm)"
+    case size6inch = "6 inch (10.2×15.2cm)"
+    
+    var id: String { rawValue }
+    
+    // Paper dimensions in pixels at 300 DPI
+    var dimensions: (width: CGFloat, height: CGFloat) {
+        switch self {
+        case .size3inch:
+            return (1050, 750)  // 8.9×6.4cm
+        case .size4inch:
+            return (1200, 900)  // 10.2×7.6cm
+        case .size5inch:
+            return (1500, 1050) // 12.7×8.9cm
+        case .size6inch:
+            return (1800, 1200) // 15.2×10.2cm (4×6 inches)
+        }
+    }
+    
+    // Size description in cm
+    var sizeInCm: String {
+        switch self {
+        case .size3inch:
+            return "8.9×6.4cm"
+        case .size4inch:
+            return "10.2×7.6cm"
+        case .size5inch:
+            return "12.7×8.9cm"
+        case .size6inch:
+            return "15.2×10.2cm"
+        }
+    }
+    
+    // Size description in pixels
+    var sizeInPixels: String {
+        let (width, height) = dimensions
+        return "\(Int(width))×\(Int(height))px"
+    }
+}
+
 struct PhotoEditorView: View {
     @ObservedObject var viewModel: PhotoProcessorViewModel
     @State private var isDragging = false
@@ -7,6 +51,20 @@ struct PhotoEditorView: View {
     @State private var frameSize: CGSize = .zero
     @State private var showPaperLayoutView = false
     @State private var forceRedraw = UUID() // Add a state to force view redraw
+    
+    // Add these properties that were previously only in PhotoPaperLayoutView
+    @State private var selectedPaperSize: PaperSize = .size6inch
+    private let defaultColumns = 4
+    private let defaultRows = 3
+    
+    // Add computed properties for current paper dimensions
+    private var paperWidth: CGFloat {
+        selectedPaperSize.dimensions.width
+    }
+    
+    private var paperHeight: CGFloat {
+        selectedPaperSize.dimensions.height
+    }
     
     // Computed properties for preview dimensions
     private var previewDimensions: (width: CGFloat, height: CGFloat, aspectRatio: CGFloat) {
@@ -498,6 +556,19 @@ struct PhotoEditorView: View {
         // Debug print
         print("Updated frame size: \(frameSize) for format: \(viewModel.selectedPhotoFormat.rawValue), aspect ratio: \(aspectRatio)")
     }
+    
+    // Normalize photo positions to ensure they stay within the paper bounds when paper size changes
+    private func normalizePhotoPositions() {
+        // Update photo positions to ensure they stay within the paper bounds
+        for (index, photo) in viewModel.savedPhotos.enumerated() {
+            // Keep the photos in their relative positions but ensure they're within bounds
+            var updatedPhoto = photo
+            let normalizedX = min(max(photo.position.x, 0.0), 1.0)
+            let normalizedY = min(max(photo.position.y, 0.0), 1.0)
+            updatedPhoto.position = CGPoint(x: normalizedX, y: normalizedY)
+            viewModel.savedPhotos[index] = updatedPhoto
+        }
+    }
 }
 
 // Fixed frame that shows the cropping area
@@ -903,9 +974,8 @@ struct PhotoPaperLayoutView: View {
     @State private var dragStartPosition: CGPoint = .zero
     @State private var isDragging = false
     
-    // Photo paper dimensions: 10.2cm x 15.2cm (4×6 inches) with 1200x1800 pixels
-    private let paperWidth: CGFloat = 1800 // pixels (15.2cm)
-    private let paperHeight: CGFloat = 1200 // pixels (10.2cm)
+    // State for selected paper size
+    @State private var selectedPaperSize: PaperSize = .size6inch
     
     // Display scale for the UI (scaled down to fit screen)
     private let displayScale: CGFloat = 0.25
@@ -914,14 +984,55 @@ struct PhotoPaperLayoutView: View {
     private let defaultColumns = 4
     private let defaultRows = 3
     
+    // Computed properties for current paper dimensions
+    private var paperWidth: CGFloat {
+        selectedPaperSize.dimensions.width
+    }
+    
+    private var paperHeight: CGFloat {
+        selectedPaperSize.dimensions.height
+    }
+    
+    // Normalize photo positions to ensure they stay within bounds when paper size changes
+    private func normalizePhotoPositions() {
+        // Update photo positions to ensure they stay within the paper bounds
+        for (index, photo) in viewModel.savedPhotos.enumerated() {
+            // Keep the photos in their relative positions but ensure they're within bounds
+            var updatedPhoto = photo
+            let normalizedX = min(max(photo.position.x, 0.0), 1.0)
+            let normalizedY = min(max(photo.position.y, 0.0), 1.0)
+            updatedPhoto.position = CGPoint(x: normalizedX, y: normalizedY)
+            viewModel.savedPhotos[index] = updatedPhoto
+        }
+    }
+    
     var body: some View {
         VStack {
-            Text("Photo Paper Layout (10.2cm × 15.2cm)")
+            Text("Photo Paper Layout")
                 .font(.headline)
                 .padding(.top)
             
+            // Paper size selector
+            HStack {
+                Text("Paper Size:")
+                    .font(.subheadline)
+                
+                Picker("", selection: $selectedPaperSize) {
+                    ForEach(PaperSize.allCases) { size in
+                        Text(size.rawValue).tag(size)
+                    }
+                }
+                .pickerStyle(MenuPickerStyle())
+                .frame(width: 220)
+                .onChange(of: selectedPaperSize) { _ in
+                    // Reset positions when paper size changes to prevent photos from going off-paper
+                    normalizePhotoPositions()
+                }
+            }
+            .padding(.bottom, 5)
+            
             // Layout information
-            Text("Paper dimensions: 1800×1200 pixels")
+            Text("Paper dimensions: \(selectedPaperSize.sizeInPixels)")
                 .font(.subheadline)
                 .foregroundColor(.secondary)
             
@@ -1183,9 +1294,9 @@ struct PhotoPaperLayoutView: View {
     private func autoArrangePhotos() {
         guard !viewModel.savedPhotos.isEmpty else { return }
         
-        // Paper dimensions in pixels
-        let paperWidth: CGFloat = 1800
-        let paperHeight: CGFloat = 1200
+        // Paper dimensions in pixels - use current selected size
+        let paperWidth: CGFloat = self.paperWidth
+        let paperHeight: CGFloat = self.paperHeight
         
         // Spacing between photos
         let spacing: CGFloat = 4
@@ -1438,11 +1549,54 @@ struct PhotoPaperLayoutView: View {
         return result
     }
     
+    // Function to duplicate a photo
+    private func duplicatePhoto(at index: Int) {
+        guard index < viewModel.savedPhotos.count else { return }
+        
+        let originalPhoto = viewModel.savedPhotos[index]
+        var duplicatedPhoto = SavedPhoto(
+            image: originalPhoto.image,
+            format: originalPhoto.format,
+            dateCreated: Date()
+        )
+        
+        // Position the duplicate slightly offset from the original
+        let offsetX: CGFloat = 0.02 // Small offset to make it visible
+        let offsetY: CGFloat = 0.02
+        
+        // Apply the offset while keeping it within paper boundaries
+        let newX = min(max(originalPhoto.position.x + offsetX, 0.0), 1.0)
+        let newY = min(max(originalPhoto.position.y + offsetY, 0.0), 1.0)
+        
+        duplicatedPhoto.position = CGPoint(x: newX, y: newY)
+        duplicatedPhoto.rotation = originalPhoto.rotation
+        duplicatedPhoto.scale = originalPhoto.scale
+        
+        // Add the duplicate to the collection
+        viewModel.savedPhotos.append(duplicatedPhoto)
+        
+        // Select the new photo
+        selectedPhotoIndex = viewModel.savedPhotos.count - 1
+    }
+    
+    // Function to rotate a photo by 90 degrees
+    private func rotatePhoto(at index: Int) {
+        guard index < viewModel.savedPhotos.count else { return }
+        
+        // Increment rotation by 90 degrees
+        viewModel.savedPhotos[index].rotation += 90
+        
+        // Normalize the rotation angle to 0-360
+        if viewModel.savedPhotos[index].rotation >= 360 {
+            viewModel.savedPhotos[index].rotation -= 360
+        }
+    }
+    
     // Save the layout as a single image
     private func saveLayout() {
-        // Force exact dimensions with no scaling: 1800 × 1200 pixels
-        let exactWidth: CGFloat = 1800
-        let exactHeight: CGFloat = 1200
+        // Get current paper dimensions
+        let exactWidth: CGFloat = paperWidth
+        let exactHeight: CGFloat = paperHeight
         
         // Create bitmap context with exact pixel dimensions
         let bitmapRep = NSBitmapImageRep(
@@ -1550,7 +1704,10 @@ struct PhotoPaperLayoutView: View {
         savePanel.isExtensionHidden = false
         savePanel.title = "Save Photo Paper Layout"
         savePanel.nameFieldLabel = "File Name:"
-        savePanel.nameFieldStringValue = "photo_layout_1800x1200_\(Date().timeIntervalSince1970).jpg"
+        
+        // Create filename with current paper dimensions
+        let sizeStr = selectedPaperSize.sizeInPixels.replacingOccurrences(of: "×", with: "x")
+        savePanel.nameFieldStringValue = "photo_layout_\(sizeStr)_\(Date().timeIntervalSince1970).jpg"
         
         if savePanel.runModal() == .OK {
             if let url = savePanel.url {
@@ -1576,49 +1733,6 @@ struct PhotoPaperLayoutView: View {
                     }
                 }
             }
-        }
-    }
-    
-    // Function to duplicate a photo
-    private func duplicatePhoto(at index: Int) {
-        guard index < viewModel.savedPhotos.count else { return }
-        
-        let originalPhoto = viewModel.savedPhotos[index]
-        var duplicatedPhoto = SavedPhoto(
-            image: originalPhoto.image,
-            format: originalPhoto.format,
-            dateCreated: Date()
-        )
-        
-        // Position the duplicate slightly offset from the original
-        let offsetX: CGFloat = 0.02 // Small offset to make it visible
-        let offsetY: CGFloat = 0.02
-        
-        // Apply the offset while keeping it within paper boundaries
-        let newX = min(max(originalPhoto.position.x + offsetX, 0.0), 1.0)
-        let newY = min(max(originalPhoto.position.y + offsetY, 0.0), 1.0)
-        
-        duplicatedPhoto.position = CGPoint(x: newX, y: newY)
-        duplicatedPhoto.rotation = originalPhoto.rotation
-        duplicatedPhoto.scale = originalPhoto.scale
-        
-        // Add the duplicate to the collection
-        viewModel.savedPhotos.append(duplicatedPhoto)
-        
-        // Select the new photo
-        selectedPhotoIndex = viewModel.savedPhotos.count - 1
-    }
-    
-    // Function to rotate a photo by 90 degrees
-    private func rotatePhoto(at index: Int) {
-        guard index < viewModel.savedPhotos.count else { return }
-        
-        // Increment rotation by 90 degrees
-        viewModel.savedPhotos[index].rotation += 90
-        
-        // Normalize the rotation angle to 0-360
-        if viewModel.savedPhotos[index].rotation >= 360 {
-            viewModel.savedPhotos[index].rotation -= 360
         }
     }
 } 
