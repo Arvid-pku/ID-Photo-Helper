@@ -84,6 +84,8 @@ The app includes templates for numerous standard photo formats:
 - macOS 10.15 (Catalina) or later
 - 4GB RAM minimum (8GB recommended for larger photos)
 - 100MB free disk space for installation
+- IOS: Under development. Please stay tuned.
+
 
 ## Performance Tips
 
